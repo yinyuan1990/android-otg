@@ -665,6 +665,21 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         applyOtgBitrate()
         setEncodingParameters()
         forceKeyframe()
+        // ⭐⭐ 2026-08-04 修「切档概率性卡死」（OTG 专版，华为实测）：上面这发 forceKeyframe 是
+        //   切档指令处理时立刻发的，而 UVC 重开流在 uvcThread 上**异步**进行——关键帧大概率
+        //   生成在旧尺寸帧上；新尺寸首批帧有没有 IDR 全看编码器重配时机，PC 解码器等不到
+        //   新尺寸 IDR 就卡最后一帧（概率性）。切档后 500/1000/2000ms 三连补发，设备侧自兜底，
+        //   不依赖 PC 版本（PC 侧另有 PLI 四连保险）。
+        val switchedTo = "${width}x${height}"
+        for (delayMs in longArrayOf(500L, 1000L, 2000L)) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (usingOtgCamera && currentWidth == width && currentHeight == height) {
+                    forceKeyframe()
+                    com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                        "切档后+${delayMs}ms 补发关键帧（$switchedTo，防新尺寸无IDR卡死）")
+                }
+            }, delayMs)
+        }
     }
 
     /**
