@@ -33,22 +33,39 @@ object AppUpdateManager {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
+    /** 拉取 app.update.config 的整份 JSON（外层 {config:"<json string>"} 壳已剥），失败 null */
+    private fun fetchUpdateConfig(): JsonObject? {
+        val req = Request.Builder()
+            .url("${APIConfig.BASE_URL}/api/config/app-update")
+            .get()
+            .build()
+        val resp = client.newCall(req).execute()
+        val body = resp.body?.string()
+        if (!resp.isSuccessful || body.isNullOrEmpty()) return null
+        val outer = gson.fromJson(body, JsonObject::class.java)
+        val cfgStr = outer.get("config")?.asString ?: return null
+        return gson.fromJson(cfgStr, JsonObject::class.java)
+    }
+
+    /** ⭐ 2026-08-04 OTG 专版下载地址（总后台「App更新配置」otg 块）——主版"外接OTG"弹框用 */
+    suspend fun fetchOtgDownloadUrl(): String? = withContext(Dispatchers.IO) {
+        try {
+            fetchUpdateConfig()?.getAsJsonObject("otg")?.get("downloadUrl")?.asString
+                ?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            println("jfh [OTG下载地址] 获取失败: ${e.message}")
+            null
+        }
+    }
+
     /** 启动时调用：需要强更返回 ForceUpdate，否则 null */
     suspend fun checkForceUpdate(context: Context): ForceUpdate? = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder()
-                .url("${APIConfig.BASE_URL}/api/config/app-update")
-                .get()
-                .build()
-            val resp = client.newCall(req).execute()
-            val body = resp.body?.string()
-            if (!resp.isSuccessful || body.isNullOrEmpty()) return@withContext null
-
-            // 外层 {config:"<json string>"}（与 ios-filter-defaults 同壳）
-            val outer = gson.fromJson(body, JsonObject::class.java)
-            val cfgStr = outer.get("config")?.asString ?: return@withContext null
-            val cfg = gson.fromJson(cfgStr, JsonObject::class.java)
-            val android = cfg.getAsJsonObject("android") ?: return@withContext null
+            val cfg = fetchUpdateConfig() ?: return@withContext null
+            // ⭐ 2026-08-04 版本独立：OTG 专版（applicationId 以 .otg 结尾）读 otg 块，
+            //   主版读 android 块。两仓库代码同构，按包名自动分流。
+            val key = if (context.packageName.endsWith(".otg")) "otg" else "android"
+            val android = cfg.getAsJsonObject(key) ?: return@withContext null
 
             val enabled = android.get("enabled")?.asBoolean ?: false
             val minVersion = android.get("minVersion")?.asString ?: ""
