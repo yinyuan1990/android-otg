@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 网络权限 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    
+    <!-- 相机权限 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <!-- 🔌 外接OTG摄像头（UVC，第四十八章）：USB Host 能力声明（非必须，不支持OTG的机型仍可装） -->
+    <!-- 不加 USB_DEVICE_ATTACHED 静态 intent-filter：避免插线自动拉起App，权限走 USBMonitor 运行时弹窗 -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    
+    <!-- 麦克风权限 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    
+    <!-- 蓝牙权限 (音频设备) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    
+    <!-- 保持屏幕常亮 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- 🔊 推流前台服务（Android 9+ 后台禁用相机，必须挂 camera 类型前台服务才能后台推流） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ⭐ 需求#3（2026-07-31）：忽略电池优化白名单。MIUI 的"智能省电"会在切后台后冻结进程
+         （前台服务也照冻），这是小米切后台断推流的主因之一；申请豁免后等价于省电策略→无限制。
+         另一半（自启动开关）系统不开放 API，由 OemPermissionHelper 引导用户到 MIUI 设置页手动开。 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Yqlandroid"
+        tools:targetApi="31">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Yqlandroid">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 🔊 推流前台服务：推流期间常驻，保证切后台/息屏时摄像头不被系统断开 -->
+        <service
+            android:name=".service.StreamingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone" />
+    </application>
+
+</manifest>

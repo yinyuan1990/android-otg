@@ -1,0 +1,62 @@
+[versions]
+accompanistPermissions = "0.34.0"
+securityCrypto = "1.1.0-alpha06"
+agp = "8.9.1"
+cameraCore = "1.5.3"
+# H265 黑屏根因：getstream fork(1.1.1/1.3.10 实测均是)的 H265 只有编解码器补丁，RTP 打包
+# 仍走 generic 私有封装(1字节头+Annex-B)，PC GStreamer rtph265depay 解不出→黑屏。
+# 换 webrtc-sdk(LiveKit) fork：与 iOS 同源同里程碑(iOS=144.7559.10)，其 H265 RTP 打包(RFC 7798)
+# 已被 iOS↔PC 链路验证互通。包名同为 org.webrtc，API 兼容。
+webrtcSdk = "144.7559.09"
+gson = "2.10.1"
+# ⭐ 2.2.10：AUSBC 3.5.3（第四十八章 OTG）用 Kotlin 2.2 编译（metadata 2.2.0），
+#   2.0.x 编译器读不了其 kotlin_module → "incompatible version of Kotlin" 编译失败；
+#   且其传递依赖 kotlin-stdlib 2.2.10。kotlin-compose 插件同引用跟随升级。
+kotlin = "2.2.10"
+coreKtx = "1.17.0"
+junit = "4.13.2"
+junitVersion = "1.3.0"
+espressoCore = "3.7.0"
+kotlinxCoroutinesAndroid = "1.8.1"
+lifecycleRuntimeKtx = "2.9.4"
+activityCompose = "1.11.0"
+composeBom = "2024.09.00"
+lifecycleViewmodelCompose = "2.10.0"
+navigationCompose = "2.9.7"
+mlkitBarcodeScanning = "17.3.0"
+okhttp = "4.12.0"
+
+[libraries]
+accompanist-permissions = { module = "com.google.accompanist:accompanist-permissions", version.ref = "accompanistPermissions" }
+androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraCore" }
+androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "cameraCore" }
+androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "cameraCore" }
+androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "cameraCore" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycleViewmodelCompose" }
+androidx-navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigationCompose" }
+stream-webrtc = { module = "io.github.webrtc-sdk:android", version.ref = "webrtcSdk" }
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
+androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutinesAndroid" }
+mlkit-barcode-scanning = { module = "com.google.mlkit:barcode-scanning", version.ref = "mlkitBarcodeScanning" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+security-crypto = { module = "androidx.security:security-crypto", version.ref = "securityCrypto" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+

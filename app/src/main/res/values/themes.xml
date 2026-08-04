@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ⭐ 深色模式灰字修复（2026-07-04）：forceDarkAllowed=false 禁止系统/厂商 ROM
+         （小米、一加等的「强制深色」）对本应用做硬件层自动反色——UI 按浅色设计，
+         反色后白底变黑、黑字变灰白，观感随机且不可控。Compose 侧同步锁定浅色配色。 -->
+    <style name="Theme.Yqlandroid" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+    </style>
+</resources>
