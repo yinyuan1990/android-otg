@@ -239,6 +239,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         requestedHeight = height
         requestedFps = framerate
         fallbackTried = false   // 新的外部切档请求：重新给一次"全败回退最后可用配置"的机会
+        triedDownSizes.clear()  // §56.12 新请求：降分辨率兜底的"已试尺寸"重新计数
         if (!capturing) {
             Log.d("meidui", "🔗 [OTG链路|重开流] ❌ capturing=false，只记参数不动流 ${width}x${height}@${framerate}")
             return
@@ -319,9 +320,30 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
      */
     private val formatBlacklist = mutableSetOf<String>()
 
+    /**
+     * ⭐ §56.12（2026-08-06，华为 JEF-AN00 240fps 卡死实锤）fps 级黑名单：
+     * 描述符声明的 fps ≠ 真谈得拢——该机 MJPEG 1280x800 描述符只有 [120] 一档，
+     * setPreviewSize(120) Java 层"假接受"、native prepare_preview 报 -51 → 0 帧；
+     * 但重试候选每次都会把 120 重新排进去 → 永远撞死在同一个 fps 上。
+     * 所以"协商成功但实测 0 帧"的 格式@尺寸@fps 必须记黑名单，下轮候选直接跳过。
+     */
+    private val fpsBlacklist = mutableSetOf<String>()
+    private fun fpsBlKey(fmt: Int, w: Int, h: Int, fps: Int) = "${fmtName(fmt)}@${w}x$h@$fps"
+
+    /** §56.12 全败降分辨率兜底时已试过的尺寸（防降档循环）；换设备/新外部切档时清空 */
+    private val triedDownSizes = mutableSetOf<String>()
+
     private fun sizeKey(w: Int, h: Int) = "${w}x$h"
     private fun fmtName(fmt: Int) = if (fmt == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUYV"
     private fun blKey(fmt: Int, w: Int, h: Int) = "${fmtName(fmt)}@${w}x$h"
+
+    /** §56.12 描述符 key（"格式@WxH"）→ (w,h)；解析失败返回 null */
+    private fun parseDescSize(key: String): Pair<Int, Int>? {
+        val sz = key.substringAfter("@").split("x")
+        val w = sz.getOrNull(0)?.toIntOrNull() ?: return null
+        val h = sz.getOrNull(1)?.toIntOrNull() ?: return null
+        return w to h
+    }
 
     /**
      * 最后一次真正出过帧的完整配置（尺寸+格式+被接受的帧率）。
@@ -404,6 +426,14 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 scheduleFpsSample(camera)        // 再等画面稳下来单独测一次帧率
                 return@Runnable
             }
+            // ⭐ §56.12：这个 格式@尺寸@协商fps 实测 0 帧 → 拉黑，下轮协商候选直接跳过。
+            //   没有它，降帧重试的候选里描述符档（如 1280x800 唯一的 120）每次都会复活，
+            //   Java 假接受 → native -51 → 0 帧无限循环（240fps 卡死的根子）。
+            if (acceptedFps > 0) {
+                fpsBlacklist.add(fpsBlKey(activeFormatInt, frameWidth, frameHeight, acceptedFps))
+                com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                    "🚫 拉黑实测0帧的档位 ${fmtName(activeFormatInt)}@${frameWidth}x${frameHeight}@${acceptedFps}fps（假接受后native -51）")
+            }
             // ⭐⭐ 2026-08-03 华为 JEF-AN00 实锤修复：Java 层 setPreviewSize 会"假接受"高 fps
             //  （请求120被"接受"为60/120），真正的协商在 native prepare_preview 才报 -51
             //   INVALID_MODE → 0帧。此前重试梯度只换 格式/带宽、fps 永远钉在高值 → 三种策略
@@ -454,6 +484,31 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                         startStreamLocked(camera)
                     } catch (e: Exception) {
                         Log.d("meidui", "🔌 [OTG] 回退重开失败: ${e.message}")
+                    }
+                    return@Runnable
+                }
+                // ⭐ §56.12 降分辨率兜底：该尺寸两种格式全谈不拢（华为 JEF-AN00 + 1280x800 实锤：
+                //   MJPEG 唯一档 120 假接受后 -51、YUYV 唯一档 10 也 0 帧）——问题是 USB 带宽，
+                //   不是格式。从描述符里挑「面积次一档、没试过的」尺寸重试，别直接躺平黑屏。
+                val curArea = requestedWidth.toLong() * requestedHeight
+                triedDownSizes.add(sizeKey(requestedWidth, requestedHeight))
+                val smaller = descriptorFps.keys
+                    .mapNotNull { parseDescSize(it) }
+                    .distinct()
+                    .filter { (w, h) -> w.toLong() * h < curArea && !triedDownSizes.contains(sizeKey(w, h)) }
+                    .maxByOrNull { (w, h) -> w.toLong() * h }
+                if (smaller != null) {
+                    Log.d("meidui", "🔌 [OTG] ⬇️ ${requestedWidth}x${requestedHeight} 全策略0帧 → 降分辨率重试 ${smaller.first}x${smaller.second}")
+                    com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                        "⬇️ ${requestedWidth}x${requestedHeight} 全策略0帧（带宽谈不拢）→ 降分辨率重试 ${smaller.first}x${smaller.second}")
+                    requestedWidth = smaller.first
+                    requestedHeight = smaller.second
+                    noFrameRetry = 0
+                    try {
+                        stopStreamLocked(camera)
+                        startStreamLocked(camera)
+                    } catch (e: Exception) {
+                        Log.d("meidui", "🔌 [OTG] 降分辨率重开失败: ${e.message}")
                     }
                     return@Runnable
                 }
@@ -562,8 +617,31 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             }
         }
 
-        val w = target?.width ?: requestedWidth
-        val h = target?.height ?: requestedHeight
+        var w = target?.width ?: requestedWidth
+        var h = target?.height ?: requestedHeight
+
+        // ⭐ §56.12 高帧率请求重定向（240fps 卡死正解）：240 这类高帧档只存在于小尺寸
+        //  （该华为实测：MJPEG 640x360/640x400/320x240=[240]，1280x800 最高 120）。
+        //   请求的 fps 超过目标尺寸描述符上限时，此前会死磕当前尺寸（降帧→-51→黑屏）；
+        //   现在自动改选「真正声明了 ≥请求fps」的最大可编码尺寸——高帧率语义本来就是分辨率让位。
+        if (requestedFps > 60 && descriptorFps.isNotEmpty()) {
+            val curMax = descriptorFps["${fmtKeyOf(frameFormat)}@${w}x${h}"]?.maxOrNull() ?: 0
+            if (curMax in 1 until requestedFps) {
+                val alt = descriptorFps.entries
+                    .filter { it.key.startsWith("${fmtKeyOf(frameFormat)}@") && it.value.any { f -> f >= requestedFps } }
+                    .mapNotNull { parseDescSize(it.key) }
+                    .filter { (aw, ah) -> EncoderSizeLimits.isEncodable(codecName(), aw, ah) }
+                    .maxByOrNull { (aw, ah) -> aw.toLong() * ah }
+                if (alt != null) {
+                    Log.d("meidui", "🔌 [OTG] 🎯 请求${requestedFps}fps 但 ${w}x${h} 描述符上限${curMax}fps" +
+                            " → 自动改选支持该帧率的 ${alt.first}x${alt.second}")
+                    com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                        "🎯 请求${requestedFps}fps 当前档${w}x${h}上限${curMax}fps → 自动切 ${alt.first}x${alt.second}@${requestedFps}fps")
+                    w = alt.first
+                    h = alt.second
+                }
+            }
+        }
 
         // ⭐ 帧率必须**精确请求**（min=max），不能给宽区间：
         //   写 min=1 等于"什么都行"，libuvc 永远挑设备默认档（30），120 的描述符轮不到；
@@ -586,7 +664,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     "(${if (frameFormat == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUYV"})=$descList" +
                     " 请求${exactFps}fps → 首选${descPick.firstOrNull() ?: descList.minOrNull()}fps")
         }
-        val candidates = (descPick +
+        val candidatesRaw = (descPick +
                 listOf(exactFps) +
                 listOfNotNull(knownGoodFps[sizeKey(w, h)]) +
                 // 请求低于描述符最低档时用设备最低真实档（采集偏高无害，推送侧另有节流）
@@ -594,6 +672,14 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 listOf(60, 30, 25, 20, 15, 10).filter { it < exactFps })
             .filter { it >= 1 }
             .distinct()
+        // ⭐ §56.12 滤掉已实测 0 帧的 fps（假接受→native -51 那种）。全被拉黑=该格式该尺寸
+        //   没有可用档 → 候选为空，下方 negotiatedOk=false 抛异常 → 上层照旧走
+        //   格式黑名单/降分辨率梯度，不再回头撞同一个 -51
+        val candidates = candidatesRaw
+            .filterNot { fpsBlacklist.contains(fpsBlKey(frameFormat, w, h, it)) }
+        if (candidates.size != candidatesRaw.size) {
+            Log.d("meidui", "🔌 [OTG] 候选fps已滤掉实测0帧档: $candidatesRaw → $candidates")
+        }
 
         camera.setFrameCallback(null, 0)
         try { camera.stopPreview() } catch (_: Exception) {}
@@ -660,6 +746,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         defaultControlValues.clear()
         formatBlacklist.clear()
         knownGoodFps.clear()
+        fpsBlacklist.clear()      // §56.12 换设备/重插，实测黑名单作废
+        triedDownSizes.clear()
         lastGoodConfig = null
         fallbackTried = false
         initialSizePicked = false
