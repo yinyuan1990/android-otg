@@ -8,6 +8,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -440,6 +442,29 @@ fun StreamingScreen(
                     )
                 }
             }
+        }
+
+        // ⭐ §56.17：OTG MJPEG 协商失败不再静默回退 YUYV —— 直接弹框报错，
+        //   错误详情带 PROBE 谈判诊断出的设备真实带宽要价（为什么 -51 一目了然）。
+        val otgFatalError by com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.fatalError.collectAsState()
+        if (otgFatalError != null) {
+            AlertDialog(
+                onDismissRequest = { com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.clearError() },
+                title = { Text("外接摄像头协商失败") },
+                text = {
+                    Text(
+                        text = otgFatalError ?: "",
+                        modifier = Modifier
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState())
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.clearError() }) {
+                        Text("知道了")
+                    }
+                }
+            )
         }
         
         // ===== 顶部导航栏（与iOS一致） =====

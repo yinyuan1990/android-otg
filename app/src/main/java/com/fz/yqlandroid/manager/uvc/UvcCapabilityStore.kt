@@ -73,6 +73,17 @@ object UvcCapabilityStore {
     private val _caps = MutableStateFlow<Caps?>(null)
     val caps: StateFlow<Caps?> = _caps
 
+    /**
+     * ⭐ §56.17 致命协商错误（用户拍板：MJPEG 谈不拢**不许静默回退 YUYV**，如实弹框）。
+     * 非空时 StreamingScreen 弹 AlertDialog 展示，点「知道了」清空。
+     * 成功出帧 / 相机关闭（拔线换设备）时自动清空。
+     */
+    private val _fatalError = MutableStateFlow<String?>(null)
+    val fatalError: StateFlow<String?> = _fatalError
+
+    fun postError(msg: String) { _fatalError.value = msg }
+    fun clearError() { _fatalError.value = null }
+
     /** PC 侧比对用：0 = 当前无 OTG 能力（未开流/自带摄像头模式） */
     val version: Long get() = _caps.value?.version ?: 0L
 

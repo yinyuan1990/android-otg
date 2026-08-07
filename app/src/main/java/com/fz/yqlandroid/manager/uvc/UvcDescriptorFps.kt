@@ -24,7 +24,18 @@ object UvcDescriptorFps {
     const val FORMAT_MJPEG = 1
     const val FORMAT_YUYV = 2
 
-    data class FrameEntry(val format: Int, val width: Int, val height: Int, val fpsList: List<Int>)
+    /**
+     * [formatIndex]/[frameIndex]/[vsInterface]/[ivByFps]：§56.17 PROBE 谈判诊断新增。
+     * 自己向设备发 UVC PROBE（SET_CUR/GET_CUR）需要报文里填 bFormatIndex/bFrameIndex/
+     * dwFrameInterval，wIndex 填 VS 接口号——全部来自描述符，解析时顺手记下。
+     */
+    data class FrameEntry(
+        val format: Int, val width: Int, val height: Int, val fpsList: List<Int>,
+        val formatIndex: Int = 0,
+        val frameIndex: Int = 0,
+        val vsInterface: Int = -1,
+        val ivByFps: Map<Int, Long> = emptyMap()
+    )
 
     private fun le16(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
@@ -99,39 +110,48 @@ object UvcDescriptorFps {
     fun parse(raw: ByteArray): List<FrameEntry> {
         val out = ArrayList<FrameEntry>()
         var o = 0
-        var curFormat = 0   // 0 = 当前不在已识别的视频格式区
+        var curFormat = 0        // 0 = 当前不在已识别的视频格式区
+        var curFormatIndex = 0   // 当前格式描述符的 bFormatIndex
+        var curIfNum = -1        // 当前标准接口描述符的接口号（VS 格式/帧描述符挂在它下面）
         while (o + 2 <= raw.size) {
             val len = raw[o].toInt() and 0xFF
             if (len < 2 || o + len > raw.size) break
             val dtype = raw[o + 1].toInt() and 0xFF
+            if (dtype == 0x04 && len >= 9) {   // Standard Interface Descriptor：跟踪接口号
+                curIfNum = raw[o + 2].toInt() and 0xFF
+            }
             if (dtype == 0x24 && len >= 3) {   // CS_INTERFACE
                 when (raw[o + 2].toInt() and 0xFF) {
-                    0x06 -> curFormat = FORMAT_MJPEG          // VS_FORMAT_MJPEG
-                    0x04 -> curFormat = FORMAT_YUYV           // VS_FORMAT_UNCOMPRESSED
+                    0x06 -> { curFormat = FORMAT_MJPEG; curFormatIndex = if (len >= 4) raw[o + 3].toInt() and 0xFF else 0 }  // VS_FORMAT_MJPEG
+                    0x04 -> { curFormat = FORMAT_YUYV;  curFormatIndex = if (len >= 4) raw[o + 3].toInt() and 0xFF else 0 }  // VS_FORMAT_UNCOMPRESSED
                     0x05, 0x07 -> if (curFormat != 0 && len >= 30) {   // VS_FRAME_*
+                        val frameIndex = raw[o + 3].toInt() and 0xFF
                         val w = le16(raw, o + 5)
                         val h = le16(raw, o + 7)
                         val nIv = raw[o + 25].toInt() and 0xFF
-                        val fps = ArrayList<Int>()
+                        // fps → dwFrameInterval（100ns）映射：PROBE 谈判诊断请求报文要用真间隔值
+                        val ivByFps = LinkedHashMap<Int, Long>()
                         if (nIv == 0) {
                             // 连续区间：min 间隔 = 最高帧率，max 间隔 = 最低帧率
                             if (len >= 38) {
                                 val minIv = le32(raw, o + 26)
                                 val maxIv = le32(raw, o + 30)
-                                if (minIv > 0) fps += (10_000_000L / minIv).toInt()
-                                if (maxIv > 0) fps += (10_000_000L / maxIv).toInt()
+                                if (minIv > 0) ivByFps[(10_000_000L / minIv).toInt()] = minIv
+                                if (maxIv > 0) ivByFps.putIfAbsent((10_000_000L / maxIv).toInt(), maxIv)
                             }
                         } else {
                             for (i in 0 until nIv) {
                                 val p = o + 26 + i * 4
                                 if (p + 4 > o + len) break
                                 val iv = le32(raw, p)
-                                if (iv > 0) fps += Math.round(10_000_000.0 / iv).toInt()
+                                if (iv > 0) ivByFps.putIfAbsent(Math.round(10_000_000.0 / iv).toInt(), iv)
                             }
                         }
-                        val cleaned = fps.filter { it in 1..1000 }.distinct().sortedDescending()
+                        val cleaned = ivByFps.keys.filter { it in 1..1000 }.distinct().sortedDescending()
                         if (w > 0 && h > 0 && cleaned.isNotEmpty()) {
-                            out += FrameEntry(curFormat, w, h, cleaned)
+                            out += FrameEntry(curFormat, w, h, cleaned,
+                                formatIndex = curFormatIndex, frameIndex = frameIndex,
+                                vsInterface = curIfNum, ivByFps = ivByFps)
                         }
                     }
                     // 其余 subtype（VS_COLORFORMAT 等）不改变 curFormat
@@ -140,5 +160,50 @@ object UvcDescriptorFps {
             o += len
         }
         return out
+    }
+
+    // MARK: - §56.17 PROBE 谈判诊断（回答"为什么 MJPEG 协商失败"）
+
+    /**
+     * 一次 PROBE 谈判的结果。
+     * [dwMaxPayloadTransferSize] 是设备对该档的**带宽要价**（每次载荷传输的字节数，isoc 下
+     * = 每微帧）。libuvc 协商时拿它在 VS 接口的 alt-setting 表里找传输档（见 stream.c：
+     * `config_bytes_per_packet >= ctrl->dwMaxPayloadTransferSize` 才选用），一个都塞不下
+     * 就返回 UVC_ERROR_INVALID_MODE(-51)——即日志里 prepare_preview err=-51 的唯一来源之一。
+     */
+    data class ProbeResult(
+        val ok: Boolean,
+        val error: String? = null,
+        val dwMaxVideoFrameSize: Long = 0,
+        val dwMaxPayloadTransferSize: Long = 0
+    )
+
+    /**
+     * 自己向设备做一遍 UVC PROBE（SET_CUR + GET_CUR，走 ep0 控制传输，不 COMMIT 不起流，
+     * 按 UVC 规范 PROBE 只是谈判草稿区、无副作用）。**必须在 native 起流（claim VS 接口）之前调**：
+     * usbfs 对 recipient=interface 的控制传输会自动 claim 接口，native 已占用时会被拒。
+     */
+    fun probeNegotiate(conn: android.hardware.usb.UsbDeviceConnection, entry: FrameEntry, fps: Int): ProbeResult {
+        val iv = entry.ivByFps[fps] ?: return ProbeResult(false, "描述符无该fps的帧间隔")
+        if (entry.vsInterface < 0 || entry.formatIndex <= 0 || entry.frameIndex <= 0) {
+            return ProbeResult(false, "描述符缺格式/帧索引(fmt=${entry.formatIndex} frm=${entry.frameIndex} if=${entry.vsInterface})")
+        }
+        val buf = ByteArray(26)   // UVC 1.1 Probe/Commit 布局，1.5 设备也认前 26 字节
+        buf[0] = 0x01             // bmHint bit0：dwFrameInterval 固定，让设备照此报要价
+        buf[2] = entry.formatIndex.toByte()
+        buf[3] = entry.frameIndex.toByte()
+        buf[4] = (iv and 0xFF).toByte()
+        buf[5] = ((iv shr 8) and 0xFF).toByte()
+        buf[6] = ((iv shr 16) and 0xFF).toByte()
+        buf[7] = ((iv shr 24) and 0xFF).toByte()
+        // SET_CUR(0x01) / GET_CUR(0x81)，wValue = VS_PROBE_CONTROL(0x01)<<8，wIndex = VS 接口号
+        val set = conn.controlTransfer(0x21, 0x01, 0x0100, entry.vsInterface, buf, buf.size, 500)
+        if (set < 0) return ProbeResult(false, "SET_CUR(PROBE)被拒 ret=$set（接口被占/设备不响应）")
+        val back = ByteArray(34)
+        val got = conn.controlTransfer(0xA1, 0x81, 0x0100, entry.vsInterface, back, back.size, 500)
+        if (got < 26) return ProbeResult(false, "GET_CUR(PROBE)失败 ret=$got")
+        return ProbeResult(true,
+            dwMaxVideoFrameSize = le32(back, 18),
+            dwMaxPayloadTransferSize = le32(back, 22))
     }
 }

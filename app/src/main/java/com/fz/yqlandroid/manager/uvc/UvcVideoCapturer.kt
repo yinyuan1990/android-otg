@@ -122,6 +122,14 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
     //   描述符规矩的摄像头切档零试错；解析不到的维持降帧收敛兜底。
     private val descriptorFps = HashMap<String, List<Int>>()
 
+    // ⭐ §56.17 PROBE 谈判诊断结果：key="MJPEG@WxH"/"YUYV@WxH"，值=逐 fps 的"设备要价 vs 本机传输档"结论。
+    //   开流前拿真实帧间隔逐档问设备 dwMaxPayloadTransferSize（libuvc -51 的判定依据），
+    //   "为什么 MJPEG 协商失败"直接看这里；MJPEG 失败弹框的错误详情也从这取。
+    private val probeVerdicts = HashMap<String, String>()
+
+    /** 本机（USB2）VS 接口最大传输档的每微帧载荷（B/µf），来自 alt-setting 解析；0=未知 */
+    @Volatile private var maxAltPayloadPerUf = 0
+
     private fun fmtKeyOf(frameFormat: Int): Int =
         if (frameFormat == UVCCamera.FRAME_FORMAT_MJPEG) UvcDescriptorFps.FORMAT_MJPEG
         else UvcDescriptorFps.FORMAT_YUYV
@@ -135,16 +143,19 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
     /** 相机打开时预读 USB 原始描述符里的每档 fps 表（提前知道，不再盲试） */
     private fun preloadDescriptorFps(device: UsbDevice) {
         descriptorFps.clear()
+        probeVerdicts.clear()
+        maxAltPayloadPerUf = 0
+        var conn: android.hardware.usb.UsbDeviceConnection? = null
         try {
             val um = appContext.getSystemService(android.content.Context.USB_SERVICE)
                     as android.hardware.usb.UsbManager
-            val conn = um.openDevice(device)
+            conn = um.openDevice(device)
             if (conn == null) {
                 Log.d("meidui", "🔌 [OTG] 📖 描述符预读失败: openDevice=null")
                 com.fz.yqlandroid.manager.OtgLogReporter.diag("📖 描述符预读失败: openDevice=null → 维持降帧收敛兜底")
                 return
             }
-            val raw = try { conn.rawDescriptors } finally { try { conn.close() } catch (_: Exception) {} }
+            val raw = conn.rawDescriptors
             if (raw == null || raw.isEmpty()) {
                 Log.d("meidui", "🔌 [OTG] 📖 描述符预读失败: rawDescriptors 为空")
                 com.fz.yqlandroid.manager.OtgLogReporter.diag("📖 描述符预读失败: rawDescriptors 为空 → 维持降帧收敛兜底")
@@ -179,6 +190,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     val altTable = alts.joinToString("  ") {
                         "IF${it.interfaceNum}alt${it.altSetting}=${it.isocPayloadPerMicroframe}B/µf(${it.bytesPerSecond / 1_000_000}MB/s)"
                     }
+                    maxAltPayloadPerUf = alts.maxOf { it.isocPayloadPerMicroframe }
                     val maxBps = alts.maxOf { it.bytesPerSecond }
                     // 设备声明的最小档需求（未压缩按 YUYV 2字节/像素估算；MJPEG 实际更小，取未压缩为上界）
                     val minNeed = entries.minOfOrNull {
@@ -194,9 +206,75 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             } catch (e: Exception) {
                 com.fz.yqlandroid.manager.OtgLogReporter.diag("🔬 传输档诊断解析失败: ${e.message}")
             }
+
+            // ⭐ §56.17 PROBE 谈判自诊断（回答"为什么 MJPEG 协商失败"）。
+            //   必须趁 native 还没 startPreview（claim VS 接口）时跑：usbfs 对 recipient=interface
+            //   的控制传输会自动 claim 接口，被 native 占住后我方 PROBE 会被拒。
+            //   连接用完在 finally 统一关（关闭即释放 usbfs 自动 claim 的接口，不影响 native 随后起流）。
+            try {
+                probeAllTiers(conn, entries)
+            } catch (e: Exception) {
+                com.fz.yqlandroid.manager.OtgLogReporter.diag("🧪 PROBE诊断异常: ${e.message}")
+            }
         } catch (e: Exception) {
             Log.d("meidui", "🔌 [OTG] 📖 描述符预读失败: ${e.message}")
             com.fz.yqlandroid.manager.OtgLogReporter.diag("📖 描述符预读失败: ${e.message} → 维持降帧收敛兜底")
+        } finally {
+            try { conn?.close() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * ⭐ §56.17 PROBE 谈判自诊断：逐档拿描述符里的真实帧间隔向设备做 UVC PROBE，读回设备的
+     * **带宽要价** dwMaxPayloadTransferSize，与本机 VS 接口最大传输档（alt-setting）对比。
+     * libuvc prepare_preview 报 -51 的判定逻辑就是"要价在 alt 表里找不到塞得下的档"
+     * （stream.c: config_bytes_per_packet >= dwMaxPayloadTransferSize 才选用，全都塞不下
+     * → UVC_ERROR_INVALID_MODE=-51）。这里把每一档的谈判结果在开流前整个摊开，
+     * "MJPEG 为什么 -51"插上设备即定案，不再靠猜。PROBE 无 COMMIT、无副作用（UVC 规范谈判草稿区）。
+     */
+    private fun probeAllTiers(conn: android.hardware.usb.UsbDeviceConnection,
+                              entries: List<UvcDescriptorFps.FrameEntry>) {
+        if (entries.isEmpty()) return
+        val maxAlt = maxAltPayloadPerUf
+        var mjpegFpsTotal = 0
+        var mjpegFpsOver = 0
+        for (e in entries) {
+            val fmt = if (e.format == UvcDescriptorFps.FORMAT_MJPEG) "MJPEG" else "YUYV"
+            val parts = ArrayList<String>()
+            for (fps in e.fpsList) {
+                val r = try {
+                    UvcDescriptorFps.probeNegotiate(conn, e, fps)
+                } catch (ex: Exception) {
+                    UvcDescriptorFps.ProbeResult(false, ex.message)
+                }
+                if (!r.ok) {
+                    parts += "${fps}fps:PROBE失败(${r.error})"
+                    continue
+                }
+                val pay = r.dwMaxPayloadTransferSize
+                val over = maxAlt > 0 && pay > maxAlt
+                if (e.format == UvcDescriptorFps.FORMAT_MJPEG) {
+                    mjpegFpsTotal++
+                    if (over) mjpegFpsOver++
+                }
+                parts += when {
+                    pay <= 0 -> "${fps}fps:要价0B(设备应答异常)"
+                    over     -> "${fps}fps:要价${pay}B/µf ❌超本机最大传输档${maxAlt}B→libuvc必-51"
+                    else     -> "${fps}fps:要价${pay}B/µf ✅可分配(帧缓冲${r.dwMaxVideoFrameSize / 1024}KB)"
+                }
+            }
+            val line = "🧪 PROBE $fmt ${e.width}x${e.height}: ${parts.joinToString("  ")}"
+            com.fz.yqlandroid.manager.OtgLogReporter.diag(line)
+            Log.d("meidui", "🔌 [OTG] $line")
+            // 同格式同尺寸多条（多 VS 接口）合并保留，弹框报错时按当前档取用
+            val key = "$fmt@${e.width}x${e.height}"
+            probeVerdicts[key] = listOfNotNull(probeVerdicts[key], parts.joinToString("  "))
+                .joinToString(" / ")
+        }
+        if (mjpegFpsTotal > 0 && mjpegFpsOver == mjpegFpsTotal) {
+            com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                "🧪 PROBE结论: MJPEG 全部 ${mjpegFpsTotal} 档要价均超本机最大传输档 ${maxAlt}B/µf" +
+                " → 该摄像头 MJPEG 按 USB3 带宽出价，手机 OTG(USB2) 下 MJPEG 必 -51，只有 YUYV 低帧档可谈")
         }
     }
 
@@ -413,6 +491,29 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             noFrameRetry = idx
         }
         val st = list[minOf(noFrameRetry, list.size - 1)]
+        // ⭐ §56.17 用户拍板：MJPEG 谈不拢**不再静默回退 YUYV**——YUYV 只有低帧档（该类摄像头
+        //   1280x800 仅 10fps），回退等于画面钉死在 10fps，还把"MJPEG 为什么失败"整个掩盖掉。
+        //   策略梯度走到 YUYV 且 PC 没有显式指定 YUYV 时：停止重试、弹框报错（错误详情来自
+        //   PROBE 谈判诊断的真实要价数据）。例外：设备描述符里压根没有 MJPEG（纯 YUYV 摄像头）
+        //   时 YUYV 不算"回退"，照常放行。PC 面板显式选 YUYV（preferredFormat=2）不受影响。
+        val deviceHasMjpeg = descriptorFps.keys.any { it.startsWith("${UvcDescriptorFps.FORMAT_MJPEG}@") }
+        if (st.format == UVCCamera.FRAME_FORMAT_YUYV && preferredFormat != 2 && deviceHasMjpeg) {
+            val sizeK = sizeKey(requestedWidth, requestedHeight)
+            // 请求尺寸与实际协商尺寸可能不同（就近选档），精确 key 查不到时列出全部 MJPEG 档的谈判结果
+            val why = probeVerdicts["MJPEG@$sizeK"]
+                ?: probeVerdicts.entries.filter { it.key.startsWith("MJPEG@") }
+                    .joinToString("\n") { "${it.key.substringAfter("@")}: ${it.value}" }
+                    .ifEmpty { "无 PROBE 诊断数据（native err=-51，设备拒绝了该组合）" }
+            val msg = "外接摄像头 MJPEG 协商失败（${requestedWidth}x${requestedHeight}），" +
+                    "已按设置不回退 YUYV 低帧模式。\n\n设备谈判详情：\n$why\n\n" +
+                    "可尝试：切换其他分辨率档位 / 更换支持 USB2 的摄像头 / PC 面板手动指定 YUYV 格式"
+            Log.d("meidui", "🔌 [OTG] ⛔ §56.17 MJPEG 失败不回退 YUYV → 弹框报错（$sizeK：$why）")
+            com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                "⛔ MJPEG 协商失败且禁止回退 YUYV（$sizeK）→ 弹框报错。PROBE: $why")
+            UvcCapabilityStore.postError(msg)
+            streamRunning = false
+            return
+        }
         activeFormatInt = st.format
         try {
             val (w, h) = negotiateAndStart(camera, st.format, st.bandwidth)
@@ -446,6 +547,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             if (frameCbCount > 0) {
                 noFrameRetry = 0   // 成功出帧：重置档位，后续切档/重开从最优策略开始
                 fallbackTried = false
+                UvcCapabilityStore.clearError()   // §56.17 新档位谈成了，撤掉遗留的协商失败弹框
                 // 登记"最后可用配置"与该尺寸的可协商帧率：全败兜底、切回时精确请求都靠它
                 lastGoodConfig = GoodConfig(frameWidth, frameHeight, activeFormatInt, acceptedFps)
                 if (acceptedFps > 0) knownGoodFps[sizeKey(frameWidth, frameHeight)] = acceptedFps
@@ -780,7 +882,10 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         lastGoodConfig = null
         fallbackTried = false
         initialSizePicked = false
+        probeVerdicts.clear()
+        maxAltPayloadPerUf = 0
         UvcCapabilityStore.clear()
+        UvcCapabilityStore.clearError()   // §56.17 拔线/换设备，协商失败弹框作废
         Log.d("meidui", "🔌 [OTG] UVC相机已关闭")
     }
 
