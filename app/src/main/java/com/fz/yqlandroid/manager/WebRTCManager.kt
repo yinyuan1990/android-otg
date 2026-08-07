@@ -784,6 +784,11 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
             Log.d("meidui", "🔌 [OTG] 摄像头模式=外接OTG → UvcVideoCapturer（Camera2 链路不启动）")
             // ⭐ 第四十八章b：OTG 模式日志上报（摄像头占用USB口没法连adb，日志推后端「OTG日志」页）。
             //   streamKey 在 startPublish 里先于 startPreview 生成，这里通常已非空；纯预览场景兜底生成会话ID。
+            //   §56.15 先塞登录账号：日志目录名带「账号_」，总后台按用户区分
+            OtgLogReporter.username = try {
+                context.getSharedPreferences("token_prefs", android.content.Context.MODE_PRIVATE)
+                    .getString("username", "") ?: ""
+            } catch (_: Exception) { "" }
             OtgLogReporter.start(streamKey)
             com.fz.yqlandroid.manager.uvc.UvcVideoCapturer(context).also { cap ->
                 // ⭐ 第五十章：UVC 能力枚举完 → 主动推给 PC（PC 据此动态生成 OTG 调节面板）。

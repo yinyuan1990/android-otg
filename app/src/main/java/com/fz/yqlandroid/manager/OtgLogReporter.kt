@@ -64,6 +64,11 @@ object OtgLogReporter {
     @Volatile private var enabled = false
     @Volatile private var streamId = ""
 
+    /** ⭐ §56.15（2026-08-07）登录账号：随每批上报带给后端，日志目录名变成
+     *  「账号_推流ID」——总后台 OTG 日志页直接看得出是哪个用户的日志。
+     *  由 WebRTCManager 在 start() 之前设置（本 object 无 context，自己拿不到）。 */
+    @Volatile var username = ""
+
     /** OTG 模式启动采集时调用（无推流时传空，内部生成预览会话ID） */
     fun start(newStreamId: String) {
         streamId = if (newStreamId.isNotEmpty()) newStreamId
@@ -156,7 +161,8 @@ object OtgLogReporter {
             //   时能直接对上是谁、跑的什么版本（老版 APK 是日志缺失的头号嫌疑）。
             bufferDiagLine("采集启动 model=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}" +
                     " sdk=${android.os.Build.VERSION.SDK_INT}" +
-                    " appVer=${com.fz.yqlandroid.BuildConfig.VERSION_NAME}")
+                    " appVer=${com.fz.yqlandroid.BuildConfig.VERSION_NAME}" +
+                    " user=${username.ifEmpty { "未登录" }}")   // §56.15 头行带账号
             var gotAnyLine = false
             try {
                 val pid = android.os.Process.myPid()
@@ -219,6 +225,8 @@ object OtgLogReporter {
                 put("prefix", PREFIX)
                 put("streamId", if (streamId.isEmpty()) "unknown" else streamId)
                 put("content", content)
+                // §56.15 带上登录账号：后端目录名变「账号_推流ID」，总后台列表直接区分是谁
+                if (username.isNotEmpty()) put("username", username)
             }
             val req = Request.Builder()
                 .url("${APIConfig.BASE_URL}/api/otglog/upload")
