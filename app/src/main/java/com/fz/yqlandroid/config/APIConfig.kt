@@ -74,6 +74,8 @@ object APIConfig {
         const val SUBMIT = "/message/submit"                     // 提交问题反馈
         const val LIST = "/message/list"                         // 获取问题反馈列表
         const val DETAIL = "/message/detail"                     // 获取问题反馈详情
+        const val UNREAD_REPLIES = "/message/unread-replies"     // §56.11 未读回复（登录后弹框）
+        const val READ = "/message/read"                         // §56.11 全部标记已读（点"已读"后不再弹）
     }
     
     // MARK: - 完整URL生成方法

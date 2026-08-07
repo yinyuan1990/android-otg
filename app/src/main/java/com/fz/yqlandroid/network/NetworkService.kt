@@ -40,7 +40,9 @@ object NetworkService {
                 ?: return@withContext Result.failure(Exception("加密失败"))
             val bodyMap = mapOf(
                 "data" to encrypted,
-                "deviceId" to request.deviceId
+                "deviceId" to request.deviceId,
+                // §56.9 上报机型（总后台用户管理「查看机型」用；后端登录成功后存到用户）
+                "deviceModel" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
             )
             val json = gson.toJson(bodyMap)
             
@@ -546,6 +548,60 @@ object NetworkService {
         }
     }
 
+    /**
+     * §56.11 获取未读回复（登录成功后调用，有未读则弹框）
+     * GET /message/unread-replies?userId= → { success, total, data: [ {replyId,messageId,messageContent,content,adminName,createdAt} ] }
+     */
+    suspend fun getUnreadReplies(userId: Int, jwtToken: String): Result<List<UnreadReplyItem>> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL("${APIConfig.Message.UNREAD_REPLIES}?userId=$userId")
+            val httpRequest = Request.Builder()
+                .url(url).get()
+                .apply {
+                    APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) }
+                    if (jwtToken.isNotEmpty()) addHeader("Authorization", "Bearer $jwtToken")
+                }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+
+            println("jfh [UnreadReplies] Status=${response.code}, Body=$body")
+
+            if (response.isSuccessful && body != null) {
+                val resp = gson.fromJson(body, UnreadRepliesResponse::class.java)
+                Result.success(resp.data ?: emptyList())
+            } else {
+                Result.failure(Exception(parseErrorMessage(body) ?: "获取未读回复失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * §56.11 全部未读回复标记已读（弹框点"已读"后调用，之后登录不再弹）
+     * POST /message/read  body: { userId }
+     */
+    suspend fun markRepliesRead(userId: Int, jwtToken: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Message.READ)
+            val json = gson.toJson(mapOf("userId" to userId))
+            val httpRequest = Request.Builder()
+                .url(url).post(json.toRequestBody(JSON_MEDIA_TYPE))
+                .apply {
+                    APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) }
+                    if (jwtToken.isNotEmpty()) addHeader("Authorization", "Bearer $jwtToken")
+                }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            println("jfh [MarkRepliesRead] Status=${response.code}")
+            if (response.isSuccessful) Result.success(Unit)
+            else Result.failure(Exception("标记已读失败: ${response.code}"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // ========== 工具方法 ==========
     
     /**
@@ -656,7 +712,27 @@ data class RegisterRequest(
     val securityQuestion2: String,
     val securityAnswer2: String,
     val securityQuestion3: String,
-    val securityAnswer3: String
+    val securityAnswer3: String,
+    // §56.9 注册时上报机型（默认自动取，调用处无需改动）
+    val deviceModel: String = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+)
+
+/**
+ * §56.11 未读回复（登录后弹框）
+ */
+data class UnreadRepliesResponse(
+    val success: Boolean = false,
+    val total: Int = 0,
+    val data: List<UnreadReplyItem>? = null
+)
+
+data class UnreadReplyItem(
+    val replyId: Long = 0,
+    val messageId: Long = 0,
+    val messageContent: String? = null,   // 我的留言原文
+    val content: String? = null,          // 管理员回复内容
+    val adminName: String? = null,
+    val createdAt: String? = null
 )
 
 /**

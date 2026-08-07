@@ -30,6 +30,7 @@ import com.fz.yqlandroid.manager.WebSocketManager
 import com.fz.yqlandroid.navigation.AppViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.launch
 import org.webrtc.SurfaceViewRenderer
 
 /**
@@ -47,6 +48,8 @@ fun StreamingScreen(
     onNavigateToProfile: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    // §56.11 协程作用域（未读回复弹框「已读」按钮里调网络用）
+    val scope = rememberCoroutineScope()
     
     // 权限（⚠️ 只放相机/麦克风——预览用 allPermissionsGranted 做门槛，
     //   通知权限绝不能混进来：用户拒绝通知会连预览一起挡掉「预览画面出不来」）
@@ -109,6 +112,9 @@ fun StreamingScreen(
     // ⭐ 需求#13（2026-07-31）：版本更新软提示（登录响应最新版本 ≠ 本地 versionName → 推流页进入时弹一次）
     var showUpdatePrompt by remember { mutableStateOf(false) }
     var updatePromptText by remember { mutableStateOf("") }
+    // ⭐ §56.11（2026-08-06）：留言未读回复弹框（登录后进推流页拉一次；点「已读」后端置已读，之后不再弹）
+    var showUnreadRepliesDialog by remember { mutableStateOf(false) }
+    var unreadReplies by remember { mutableStateOf<List<com.fz.yqlandroid.network.UnreadReplyItem>>(emptyList()) }
     // ⭐ 需求#3（2026-07-31）：小米后台推流引导（自启动+省电策略无 API，只能引导用户手动开）
     var showXiaomiGuide by remember { mutableStateOf(false) }
     var connectionStatus by remember { mutableStateOf("未连接") }
@@ -262,6 +268,23 @@ fun StreamingScreen(
                 showUpdatePrompt = true
             }
         } catch (_: Exception) { /* 版本读取失败不拦截使用 */ }
+    }
+
+    // ⭐ §56.11：登录后拉未读留言回复（有则弹框，点「已读」后不再弹）
+    LaunchedEffect(Unit) {
+        try {
+            val tokenPrefs = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+            val userId = tokenPrefs.getInt("user_id", 0)
+            val jwtToken = tokenPrefs.getString("jwt_token", "") ?: ""
+            if (userId > 0 && jwtToken.isNotEmpty()) {
+                com.fz.yqlandroid.network.NetworkService.getUnreadReplies(userId, jwtToken).onSuccess { replies ->
+                    if (replies.isNotEmpty()) {
+                        unreadReplies = replies
+                        showUnreadRepliesDialog = true
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 拉取失败不拦截使用 */ }
     }
 
     // ⭐ 需求#3：小米切后台断推流的权限处理（进推流页时做，一次性）：
@@ -517,6 +540,47 @@ fun StreamingScreen(
                 text = { Text(updatePromptText) },
                 confirmButton = {
                     TextButton(onClick = { showUpdatePrompt = false }) { Text("知道了") }
+                }
+            )
+        }
+
+        // ⭐ §56.11：留言未读回复弹框（点「已读」→ 后端置已读，之后登录不再弹；点外部关闭 = 下次登录还会弹）
+        if (showUnreadRepliesDialog) {
+            AlertDialog(
+                onDismissRequest = { showUnreadRepliesDialog = false },
+                title = { Text("客服回复了你的留言") },
+                text = {
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        modifier = Modifier.heightIn(max = 320.dp)
+                    ) {
+                        items(unreadReplies.size) { i ->
+                            val r = unreadReplies[i]
+                            Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                                if (!r.messageContent.isNullOrEmpty()) {
+                                    Text("我：${r.messageContent}", fontSize = 12.sp, color = Color.Gray)
+                                }
+                                Text("回复：${r.content ?: ""}", fontSize = 14.sp)
+                                Text(
+                                    "${r.adminName ?: "客服"} · ${r.createdAt?.replace("T", " ")?.take(16) ?: ""}",
+                                    fontSize = 11.sp, color = Color.Gray
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showUnreadRepliesDialog = false
+                        // 标记已读（失败也不打扰用户，下次登录会再弹一次）
+                        scope.launch {
+                            try {
+                                val tokenPrefs = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                                val userId = tokenPrefs.getInt("user_id", 0)
+                                val jwtToken = tokenPrefs.getString("jwt_token", "") ?: ""
+                                if (userId > 0) com.fz.yqlandroid.network.NetworkService.markRepliesRead(userId, jwtToken)
+                            } catch (_: Exception) {}
+                        }
+                    }) { Text("已读，不再提醒") }
                 }
             )
         }
