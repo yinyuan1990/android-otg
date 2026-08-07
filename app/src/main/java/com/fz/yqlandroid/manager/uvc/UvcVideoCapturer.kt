@@ -165,6 +165,35 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             } else {
                 com.fz.yqlandroid.manager.OtgLogReporter.diag("📖 描述符预读 ${entries.size}条: $table")
             }
+
+            // ⭐ §56.14 传输档（alt-setting）自诊断：全档 -51 时据此定案是不是"USB3-only 摄像头"。
+            //   libuvc 协商要在 VS 接口的 alt 表里找一个带宽塞得下的档，找不到就 -51。
+            //   这里把每个 alt 的每微帧载荷和理论带宽打出来，并给出与设备最小档需求的对比判定。
+            try {
+                val alts = UvcDescriptorFps.parseAltSettings(raw)
+                    .filter { it.isocPayloadPerMicroframe > 0 }
+                if (alts.isEmpty()) {
+                    com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                        "🔬 传输档诊断: VS接口没有任何带isoc端点的alt-setting → 该摄像头在当前USB模式下物理无法出流（疑似USB3-only/bulk-only固件）")
+                } else {
+                    val altTable = alts.joinToString("  ") {
+                        "IF${it.interfaceNum}alt${it.altSetting}=${it.isocPayloadPerMicroframe}B/µf(${it.bytesPerSecond / 1_000_000}MB/s)"
+                    }
+                    val maxBps = alts.maxOf { it.bytesPerSecond }
+                    // 设备声明的最小档需求（未压缩按 YUYV 2字节/像素估算；MJPEG 实际更小，取未压缩为上界）
+                    val minNeed = entries.minOfOrNull {
+                        it.width.toLong() * it.height * 2 * (it.fpsList.minOrNull() ?: 30)
+                    } ?: 0L
+                    com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                        "🔬 传输档诊断: $altTable | 最大可用≈${maxBps / 1_000_000}MB/s" +
+                        "（USB2高速isoc上限≈24MB/s）| 设备最小档需求≈${minNeed / 1_000_000}MB/s" +
+                        (if (maxBps in 1 until minNeed)
+                            " → 🔴 最大传输档都塞不下最小分辨率档：USB2 模式下无解，该摄像头需要 USB3 接口（手机OTG是USB2，换USB2兼容摄像头）"
+                         else ""))
+                }
+            } catch (e: Exception) {
+                com.fz.yqlandroid.manager.OtgLogReporter.diag("🔬 传输档诊断解析失败: ${e.message}")
+            }
         } catch (e: Exception) {
             Log.d("meidui", "🔌 [OTG] 📖 描述符预读失败: ${e.message}")
             com.fz.yqlandroid.manager.OtgLogReporter.diag("📖 描述符预读失败: ${e.message} → 维持降帧收敛兜底")

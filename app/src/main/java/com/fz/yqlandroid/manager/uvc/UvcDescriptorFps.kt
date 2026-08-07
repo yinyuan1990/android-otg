@@ -33,6 +33,69 @@ object UvcDescriptorFps {
         (b[o].toLong() and 0xFF) or ((b[o + 1].toLong() and 0xFF) shl 8) or
         ((b[o + 2].toLong() and 0xFF) shl 16) or ((b[o + 3].toLong() and 0xFF) shl 24)
 
+    /**
+     * ⭐ §56.14（2026-08-07）VideoStreaming 接口的传输档（alternate setting）清单。
+     *
+     * 背景：华为 JEF-AN00 + 某"240fps"摄像头，**所有格式所有帧率全部 native err=-51**
+     * （连 YUYV@10fps 都谈不拢，与帧率无关）——嫌疑是该摄像头固件按 USB3 设计，
+     * USB2 模式下没有任何塞得进带宽的传输档。isoc 带宽在 UVC 里由 VS 接口的
+     * alt-setting 决定：libuvc 协商时要找一个 wMaxPacketSize 满足需求的 alt，
+     * 找不到就 -51。把 alt 表解析出来打日志，插上设备即可定案，不用猜。
+     *
+     * wMaxPacketSize 编码（USB2 高速）：bits0-10=每微帧字节数，bits11-12=附加事务数
+     * （每微帧有效载荷 = size × (1+addTrans)，上限 1024×3=3072；每秒 8000 微帧）。
+     */
+    data class AltEntry(
+        val interfaceNum: Int,
+        val altSetting: Int,
+        val isocPayloadPerMicroframe: Int   // 0 = 该 alt 无 isoc 端点（如 alt0 零带宽档）
+    ) {
+        /** 该档理论带宽（字节/秒，USB2 高速 8000 微帧/秒） */
+        val bytesPerSecond: Long get() = isocPayloadPerMicroframe.toLong() * 8000
+    }
+
+    fun parseAltSettings(raw: ByteArray): List<AltEntry> {
+        val out = ArrayList<AltEntry>()
+        var o = 0
+        var curIfNum = -1
+        var curAlt = -1
+        var curIsVideoStreaming = false
+        var curMaxPayload = 0
+        fun flush() {
+            if (curIsVideoStreaming && curIfNum >= 0) {
+                out += AltEntry(curIfNum, curAlt, curMaxPayload)
+            }
+        }
+        while (o + 2 <= raw.size) {
+            val len = raw[o].toInt() and 0xFF
+            if (len < 2 || o + len > raw.size) break
+            when (raw[o + 1].toInt() and 0xFF) {
+                0x04 -> if (len >= 9) {   // Standard Interface Descriptor
+                    flush()
+                    curIfNum = raw[o + 2].toInt() and 0xFF
+                    curAlt = raw[o + 3].toInt() and 0xFF
+                    // class 0x0E=CC_VIDEO, subclass 0x02=SC_VIDEOSTREAMING
+                    curIsVideoStreaming = (raw[o + 5].toInt() and 0xFF) == 0x0E
+                            && (raw[o + 6].toInt() and 0xFF) == 0x02
+                    curMaxPayload = 0
+                }
+                0x05 -> if (len >= 7 && curIsVideoStreaming) {   // Endpoint Descriptor
+                    val attrs = raw[o + 3].toInt() and 0x03
+                    if (attrs == 0x01) {   // isochronous
+                        val wMax = le16(raw, o + 4)
+                        val size = wMax and 0x07FF
+                        val addTrans = (wMax shr 11) and 0x03
+                        val payload = size * (1 + addTrans)
+                        if (payload > curMaxPayload) curMaxPayload = payload
+                    }
+                }
+            }
+            o += len
+        }
+        flush()
+        return out
+    }
+
     fun parse(raw: ByteArray): List<FrameEntry> {
         val out = ArrayList<FrameEntry>()
         var o = 0
