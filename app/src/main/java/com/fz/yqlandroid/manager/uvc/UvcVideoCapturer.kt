@@ -405,6 +405,9 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             camera.open(ctrlBlock)
             uvcCamera = camera
             currentDeviceName = device.productName ?: device.deviceName
+            // §56.18：UVCCamera.open() 内部已调过一次 nativeSetPreviewSize(第一个尺寸,[1,31],MJPEG)，
+            // native 侧有残留状态且内容未知 → 置为未知，首次协商强制走翻转脏化保证真谈判
+            resetNativeStoredState()
             preloadDescriptorFps(device)   // ⭐ 先读描述符 fps 表，随后的协商直接按真值请求
             startStreamLocked(camera)
             dumpCapabilitiesLocked(camera)   // ⭐ 能力枚举 → 画面层叠显 + OTG日志
@@ -467,6 +470,58 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
     /** 本轮开流实际用的格式与被设备接受的帧率（看门狗成功时据此登记 lastGood/黑名单） */
     @Volatile private var activeFormatInt = UVCCamera.FRAME_FORMAT_MJPEG
     @Volatile private var acceptedFps = 0
+
+    /**
+     * ⭐ §56.18 「假接受→-51」根因修复（AUSBC 源码实锤，2026-08-07 定案）。
+     *
+     * UVCPreview.cpp::setPreviewSize 只在 (宽,高,格式) 与上次不同才真谈判并保存 fps：
+     *   `if ((requestWidth != width) || (requestHeight != height) || (requestMode != mode)) { ...真谈判... }`
+     * 宽高格式没变、**只变 fps** 的调用直接返回 0（fps 根本不存！）——这就是"假接受"。
+     * 随后 startPreview→prepare_preview 拿**存住的旧 fps 区间**重新谈判，
+     * 匹配条件 `10^7/interval ∈ [min,max]`：候选梯度先试 30（真谈判失败但 30 已被保存），
+     * 再试 120 被假接受 → prepare 用 [30,30] 找 120 的描述符 → 永远 -51。
+     * 另外 UVCCamera.java open() 一上来就 nativeSetPreviewSize(第一个尺寸, [1,31], MJPEG)，
+     * native 侧从一开始就有残留状态。
+     *
+     * 修复：跟踪 native 侧实际保存的 (w,h,mode,fps,上次是否成功)；发现本次调用会被
+     * 短路假接受时（宽高格式相同而 fps 不同 / 状态未知 / 同参数上次失败），先用**另一格式**
+     * 同尺寸调一次"翻转脏化"（结果无所谓，native 必真谈判并覆盖保存），再发真请求——
+     * 保证每个候选 fps 都经过真谈判，prepare_preview 用的就是本次的 fps。
+     * fps 窗口发 [fps-1, fps]：native 用整除（floor），我们描述符解析用四舍五入，差 1 兜住。
+     */
+    @Volatile private var nativeStoredW = -1
+    @Volatile private var nativeStoredH = -1
+    @Volatile private var nativeStoredMode = -1
+    @Volatile private var nativeStoredFps = -1
+    @Volatile private var nativeStoredOk = false
+
+    private fun resetNativeStoredState() {
+        nativeStoredW = -1; nativeStoredH = -1; nativeStoredMode = -1
+        nativeStoredFps = -1; nativeStoredOk = false
+    }
+
+    private fun setPreviewSizeNegotiated(camera: UVCCamera, w: Int, h: Int, fps: Int, format: Int, bw: Float) {
+        val sameWhm = (nativeStoredW == w && nativeStoredH == h && nativeStoredMode == format)
+        val wouldShortCircuit = sameWhm && (nativeStoredFps != fps || !nativeStoredOk)
+        if (nativeStoredMode == -1 || wouldShortCircuit) {
+            val other = if (format == UVCCamera.FRAME_FORMAT_MJPEG)
+                UVCCamera.FRAME_FORMAT_YUYV else UVCCamera.FRAME_FORMAT_MJPEG
+            try {
+                camera.setPreviewSize(w, h, fps - 1, fps, other, bw)
+            } catch (_: Exception) { /* 翻转只为脏化 native 状态，谈不拢无所谓 */ }
+            nativeStoredW = w; nativeStoredH = h; nativeStoredMode = other; nativeStoredFps = fps
+        }
+        try {
+            camera.setPreviewSize(w, h, fps - 1, fps, format, bw)
+            nativeStoredOk = true
+        } catch (e: Exception) {
+            nativeStoredOk = false
+            throw e
+        } finally {
+            // native 侧赋值发生在谈判之前：无论成败 (w,h,mode,fps) 都已被保存
+            nativeStoredW = w; nativeStoredH = h; nativeStoredMode = format; nativeStoredFps = fps
+        }
+    }
 
     /** 按当前重试档位选 格式/带宽 开流；开流后装「无帧看门狗」，2.5s 没帧自动切下一档重开 */
     private fun startStreamLocked(camera: UVCCamera) {
@@ -785,24 +840,27 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             declaredFps > 0  -> declaredFps
             else             -> PROBE_MAX_FPS
         }
-        // ⭐ 2026-08-03 描述符预读优先：该 格式@尺寸 的真实 fps 表已在相机打开时解析好
-        //  （preloadDescriptorFps），首选"描述符声明、且不超请求值"的最高档——直接命中，
-        //   不再靠 Java 假接受 + 看门狗盲试。描述符缺失/乱写时照旧走老梯度兜底。
+        // ⭐ §56.18 描述符已知时候选**只用描述符真值**（改自 2026-08-03 的"描述符优先"）：
+        //   native 匹配条件是 fps 区间必须套住某个描述符档（it=10^7/interval ∈ [min,max]），
+        //   非描述符值（如对着只有[120]的档喊 30）**必然真谈判失败**，而失败的那次调用
+        //   还会把错误 fps 存进 native（§56.18 假接受根因）。排序：≤请求值的从高到低；
+        //   全都高于请求时用「高于请求的最小档」（采集偏高无害，推送侧另有节流）。
+        //   描述符缺失/乱写的摄像头照旧走老梯度兜底。
         val descList = descriptorFps["${fmtKeyOf(frameFormat)}@${w}x${h}"].orEmpty()
-        val descPick = descList.filter { it <= exactFps }
-        if (descList.isNotEmpty()) {
+        val candidatesRaw = if (descList.isNotEmpty()) {
+            val below = descList.filter { it <= exactFps }          // descList 已降序
+            val above = descList.filter { it > exactFps }.sorted()
             Log.d("meidui", "🔌 [OTG] 📖 描述符档@${w}x${h}" +
                     "(${if (frameFormat == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUYV"})=$descList" +
-                    " 请求${exactFps}fps → 首选${descPick.firstOrNull() ?: descList.minOrNull()}fps")
+                    " 请求${exactFps}fps → 候选=${below + above}（只用描述符真值）")
+            below + above
+        } else {
+            (listOf(exactFps) +
+                    listOfNotNull(knownGoodFps[sizeKey(w, h)]) +
+                    listOf(60, 30, 25, 20, 15, 10).filter { it < exactFps })
+                .filter { it >= 1 }
+                .distinct()
         }
-        val candidatesRaw = (descPick +
-                listOf(exactFps) +
-                listOfNotNull(knownGoodFps[sizeKey(w, h)]) +
-                // 请求低于描述符最低档时用设备最低真实档（采集偏高无害，推送侧另有节流）
-                listOfNotNull(descList.minOrNull()) +
-                listOf(60, 30, 25, 20, 15, 10).filter { it < exactFps })
-            .filter { it >= 1 }
-            .distinct()
         // ⭐ §56.12 滤掉已实测 0 帧的 fps（假接受→native -51 那种）。全被拉黑=该格式该尺寸
         //   没有可用档 → 候选为空，下方 negotiatedOk=false 抛异常 → 上层照旧走
         //   格式黑名单/降分辨率梯度，不再回头撞同一个 -51
@@ -818,17 +876,22 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         var lastErr: Exception? = null
         for (fps in candidates) {
             try {
-                camera.setPreviewSize(w, h, fps, fps, frameFormat, bandwidth)
+                // §56.18：保证真谈判（不再被 native 的"宽高格式没变就短路"假接受）
+                setPreviewSizeNegotiated(camera, w, h, fps, frameFormat, bandwidth)
                 acceptedFps = fps
                 negotiatedOk = true
-                Log.d("meidui", "🔌 [OTG] 帧率精确请求 ${fps}fps @${w}x${h} ✅被接受" +
+                Log.d("meidui", "🔌 [OTG] 帧率精确请求 ${fps}fps @${w}x${h} ✅真谈判通过" +
                         (if (fps != exactFps) "（请求的 ${exactFps}fps 该档没有，梯度降级）" else "") +
                         (if (declaredFps > 0) "（设备声明${declaredFps}fps）" else "") +
                         (if (descList.contains(fps)) "（命中描述符声明档）" else ""))
+                com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                    "✅ 真谈判通过 ${fmtName(frameFormat)} ${w}x${h}@${fps}fps（请求${exactFps}fps）")
                 break
             } catch (e: Exception) {
                 lastErr = e
                 Log.d("meidui", "🔌 [OTG] ${fps}fps @${w}x${h} 谈不拢(${e.message}) → 试下一档")
+                com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                    "✖ 真谈判被拒 ${fmtName(frameFormat)} ${w}x${h}@${fps}fps: ${e.message}")
             }
         }
         if (!negotiatedOk) {
@@ -884,6 +947,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         initialSizePicked = false
         probeVerdicts.clear()
         maxAltPayloadPerUf = 0
+        resetNativeStoredState()
         UvcCapabilityStore.clear()
         UvcCapabilityStore.clearError()   // §56.17 拔线/换设备，协商失败弹框作废
         Log.d("meidui", "🔌 [OTG] UVC相机已关闭")
