@@ -398,10 +398,11 @@ fun LoginScreen(
                                         putString("connect_mode", backendConnectMode)
                                         // ⭐ 摄像头模式运行时决策值（WebRTCManager.startPreview 读取，第四十八章）
                                         putString("camera_mode", selectedCameraMode)
-                                        // ⭐ §53.4.4 编码默认值改由总后台配置（默认 h265；本机硬编或观看端内核
-                                        //   不支持时由 SessionPolicy/H265Support 自动回退 h264）。字段缺省=老后端→h265。
-                                        val codecP2p = (response.videoCodecP2p ?: "h265").lowercase()
-                                        val codecSrs = (response.videoCodecSrs ?: "h265").lowercase()
+                                        // ⭐ §53.4.4 编码默认值改由总后台配置（本机硬编或观看端内核
+                                        //   不支持时由 SessionPolicy/H265Support 自动回退 h264）。
+                                        //   §56.27：产品默认改 h264——字段缺省（老后端）也按 h264，与后端部署无关。
+                                        val codecP2p = (response.videoCodecP2p ?: "h264").lowercase()
+                                        val codecSrs = (response.videoCodecSrs ?: "h264").lowercase()
                                         putString(com.fz.yqlandroid.manager.H265Support.PREFS_RUNTIME_KEY, codecP2p)
                                         putString(com.fz.yqlandroid.manager.H265Support.PREFS_RUNTIME_KEY_SRS, codecSrs)
                                         // ⭐ §53.20.2：本机公网出口 IP，SessionPolicy 拿它与 PC 的

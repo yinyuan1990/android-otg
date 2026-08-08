@@ -261,11 +261,11 @@ object SessionPolicy {
         return Decision(mode, codec, reasons.joinToString("；"))
     }
 
-    /** 服务器下发的默认编码（登录时写进 token_prefs；读不到按 h265 = 产品默认） */
+    /** 服务器下发的默认编码（登录时写进 token_prefs；读不到按 h264 = §56.27 产品默认，与后端部署无关） */
     private fun serverDefaultCodec(context: Context?, mode: Mode): String {
         val key = if (mode == Mode.P2P) H265Support.PREFS_RUNTIME_KEY else H265Support.PREFS_RUNTIME_KEY_SRS
         return context?.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
-            ?.getString(key, "h265")?.lowercase() ?: "h265"
+            ?.getString(key, "h264")?.lowercase() ?: "h264"
     }
 
     // ---------- 重新协商 ----------
