@@ -421,28 +421,8 @@ fun StreamingScreen(
             }
         }
 
-        // ⭐ 第四十八章：OTG 模式能力叠显（软/硬件可调参数+上下限，供 PC 调节面板改造对照）。
-        //   OTG 占用 USB 口无法连 adb，直接叠到画面层最直观；同内容也打进 meidui 日志 → 后端「OTG日志」。
-        //   仅 OTG 开流后有内容（UvcCapabilityStore），自带摄像头模式恒为空、不显示。
-        val otgCapLines by com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.lines.collectAsState()
-        if (otgCapLines.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 90.dp, start = 8.dp, end = 8.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
-            ) {
-                otgCapLines.forEach { line ->
-                    Text(
-                        text = line,
-                        color = if (line.contains("✗")) Color(0xFFFFB74D) else Color(0xFF9CFF9C),
-                        fontSize = 10.sp,
-                        lineHeight = 13.sp
-                    )
-                }
-            }
-        }
+        // ⭐ 第四十八章的 OTG 能力叠显（画面左上角黑底参数列表）已按 §56.28b 移除：
+        //   调试期产物，PC 调节面板早已上线；同内容仍打进 meidui 日志 → 后端「OTG日志」，排障不受影响。
 
         // ⭐ §56.17：OTG MJPEG 协商失败不再静默回退 YUYV —— 直接弹框报错，
         //   错误详情带 PROBE 谈判诊断出的设备真实带宽要价（为什么 -51 一目了然）。
