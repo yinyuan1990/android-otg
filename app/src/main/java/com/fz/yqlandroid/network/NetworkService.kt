@@ -42,7 +42,11 @@ object NetworkService {
                 "data" to encrypted,
                 "deviceId" to request.deviceId,
                 // §56.9 上报机型（总后台用户管理「查看机型」用；后端登录成功后存到用户）
-                "deviceModel" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+                "deviceModel" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
+                // ⭐ §57.4：OTG 专版标识——账号未用 OTG 码开通/已过期时后端拒登
+                //   （code=OTG_NOT_ACTIVATED，error 文案经 parseErrorMessage 原样显示在登录页）。
+                //   主版 yql-android 不带此字段，行为不变。老后端未部署 §57.4 时忽略该字段，照常放行。
+                "clientVariant" to "otg"
             )
             val json = gson.toJson(bodyMap)
             
