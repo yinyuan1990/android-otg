@@ -58,6 +58,9 @@ object DeviceIDManager {
      * - 盐值: 增加安全性
      */
     private const val PLATFORM_PREFIX = "android" // 🔥 平台前缀：与iOS共用同一套接口，靠此前缀区分平台
+    // ⭐ §57.6：OTG 专版后缀——总后台按「android 前缀 + otg 后缀」把用户类型判成 Android-OTG，
+    //   与 PC OTG 版设备号 `_OTG` 后缀（§56.22b）同思路。存量 OTG 测试号设备号会变（用户拍板不做迁移）。
+    private const val OTG_SUFFIX = "otg"
 
     private fun generatePersistentID(context: Context): String {
         val androidId = getAndroidID(context)
@@ -67,8 +70,8 @@ object DeviceIDManager {
         // 组合: ANDROID_ID-包名-盐值
         val combined = "$androidId-$packageName-$salt"
         
-        // SHA256 哈希，取前32位（与iOS一致），再加 android 前缀区分平台
-        return PLATFORM_PREFIX + sha256(combined).take(32).uppercase()
+        // SHA256 哈希，取前32位（与iOS一致），加 android 前缀区分平台 + otg 后缀区分专版
+        return PLATFORM_PREFIX + sha256(combined).take(32).uppercase() + OTG_SUFFIX
     }
     
     /**
