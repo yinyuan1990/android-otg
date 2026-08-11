@@ -117,6 +117,10 @@ fun StreamingScreen(
     // ⭐ §56.11（2026-08-06）：留言未读回复弹框（登录后进推流页拉一次；点「已读」后端置已读，之后不再弹）
     var showUnreadRepliesDialog by remember { mutableStateOf(false) }
     var unreadReplies by remember { mutableStateOf<List<com.fz.yqlandroid.network.UnreadReplyItem>>(emptyList()) }
+    // ⭐ §59（2026-08-12）：登录广告弹框（后台可编辑 HTML，WebView 展示；点「已读」本地记 version 不再弹，后台改内容会重新弹）
+    var showLoginAdDialog by remember { mutableStateOf(false) }
+    var loginAdTitle by remember { mutableStateOf("公告") }
+    var loginAdVersion by remember { mutableStateOf(0L) }
     // ⭐ 需求#3（2026-07-31）：小米后台推流引导（自启动+省电策略无 API，只能引导用户手动开）
     var showXiaomiGuide by remember { mutableStateOf(false) }
     var connectionStatus by remember { mutableStateOf("未连接") }
@@ -283,6 +287,23 @@ fun StreamingScreen(
                     if (replies.isNotEmpty()) {
                         unreadReplies = replies
                         showUnreadRepliesDialog = true
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 拉取失败不拦截使用 */ }
+    }
+
+    // ⭐ §59：登录后拉广告配置（公开接口）——enabled 且 version != 本地已读version → 弹广告框
+    LaunchedEffect(Unit) {
+        try {
+            com.fz.yqlandroid.network.NetworkService.getLoginAd().onSuccess { ad ->
+                if (ad.enabled && ad.version > 0) {
+                    val readVersion = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                        .getLong("login_ad_read_version", 0L)
+                    if (ad.version != readVersion) {
+                        loginAdTitle = ad.title ?: "公告"
+                        loginAdVersion = ad.version
+                        showLoginAdDialog = true
                     }
                 }
             }
@@ -588,6 +609,95 @@ fun StreamingScreen(
                     }) { Text("已读，不再提醒") }
                 }
             )
+        }
+
+        // ⭐ §59：登录广告弹框（WebView 加载后端 /config/login-ad/page；链接点击开外部浏览器、长按可复制；
+        //   「已读，不再提醒」→ 本地记 version，该版本不再弹；「关闭」/点外部 = 下次登录还弹）
+        if (showLoginAdDialog) {
+            val adPageUrl = com.fz.yqlandroid.config.APIConfig.fullURL(com.fz.yqlandroid.config.APIConfig.Ad.LOGIN_AD_PAGE)
+            val openExternal: (String) -> Unit = { url ->
+                try {
+                    context.startActivity(
+                        android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (_: Exception) { /* 无浏览器可用时静默 */ }
+            }
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = { showLoginAdDialog = false },
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .fillMaxHeight(0.78f),
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.White
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                loginAdTitle,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 17.sp,
+                                color = Color.Black,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = { openExternal(adPageUrl) }) {
+                                Text("浏览器打开", fontSize = 13.sp)
+                            }
+                        }
+                        HorizontalDivider(color = Color(0xFFEEEEEE))
+                        AndroidView(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            factory = { ctx ->
+                                android.webkit.WebView(ctx).apply {
+                                    webViewClient = object : android.webkit.WebViewClient() {
+                                        // 初始 loadUrl 不走此回调，只有点内容里的链接才会进来 → 一律外部浏览器打开
+                                        override fun shouldOverrideUrlLoading(
+                                            view: android.webkit.WebView?,
+                                            request: android.webkit.WebResourceRequest?
+                                        ): Boolean {
+                                            val url = request?.url?.toString() ?: return false
+                                            openExternal(url)
+                                            return true
+                                        }
+                                    }
+                                    settings.javaScriptEnabled = false
+                                    settings.domStorageEnabled = true
+                                    settings.textZoom = 100
+                                    loadUrl(adPageUrl)
+                                }
+                            }
+                        )
+                        HorizontalDivider(color = Color(0xFFEEEEEE))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { showLoginAdDialog = false }) {
+                                Text("关闭", color = Color.Gray)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            TextButton(onClick = {
+                                context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                                    .edit().putLong("login_ad_read_version", loginAdVersion).apply()
+                                showLoginAdDialog = false
+                            }) { Text("已读，不再提醒") }
+                        }
+                    }
+                }
+            }
         }
 
         // ⭐ 需求#1：试用到期弹框（不可点外关闭；确定 → 清理并回登录页，对齐 iOS「取消→登录页」路径）

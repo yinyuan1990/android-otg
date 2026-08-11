@@ -77,6 +77,11 @@ object APIConfig {
         const val UNREAD_REPLIES = "/message/unread-replies"     // §56.11 未读回复（登录后弹框）
         const val READ = "/message/read"                         // §56.11 全部标记已读（点"已读"后不再弹）
     }
+
+    object Ad {
+        const val LOGIN_AD = "/config/login-ad"                  // §59 登录广告配置（公开接口）
+        const val LOGIN_AD_PAGE = "/config/login-ad/page"        // §59 广告 HTML 页（WebView 直接加载）
+    }
     
     // MARK: - 完整URL生成方法
     

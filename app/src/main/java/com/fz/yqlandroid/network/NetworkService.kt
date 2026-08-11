@@ -606,6 +606,35 @@ object NetworkService {
         }
     }
 
+    /**
+     * §59 获取登录广告配置（公开接口，登录成功进推流页后调用）
+     * GET /config/login-ad → { config: "<json string>" }，json = {enabled,title,content,version}
+     * 客户端只用 enabled/title/version（内容由 WebView 直接加载 /config/login-ad/page）
+     */
+    suspend fun getLoginAd(): Result<LoginAdConfig> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Ad.LOGIN_AD)
+            val httpRequest = Request.Builder()
+                .url(url).get()
+                .apply { APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) } }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+
+            println("jfh [LoginAd] Status=${response.code}, Body=$body")
+
+            if (response.isSuccessful && body != null) {
+                val envelope = gson.fromJson(body, LoginAdEnvelope::class.java)
+                val cfg = gson.fromJson(envelope.config ?: "{}", LoginAdConfig::class.java)
+                Result.success(cfg)
+            } else {
+                Result.failure(Exception("获取登录广告失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // ========== 工具方法 ==========
     
     /**
@@ -737,6 +766,20 @@ data class UnreadReplyItem(
     val content: String? = null,          // 管理员回复内容
     val adminName: String? = null,
     val createdAt: String? = null
+)
+
+/**
+ * §59 登录广告：外层 { config: "<json string>" }，内层 {enabled,title,content,version}
+ * version=总后台每次保存写入的时间戳，本地记「已读version」判断是否重新弹
+ */
+data class LoginAdEnvelope(
+    val config: String? = null
+)
+
+data class LoginAdConfig(
+    val enabled: Boolean = false,
+    val title: String? = null,
+    val version: Long = 0
 )
 
 /**
