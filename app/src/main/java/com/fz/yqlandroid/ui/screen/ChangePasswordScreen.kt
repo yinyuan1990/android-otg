@@ -142,7 +142,8 @@ fun ChangePasswordScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .background(Color.White)
-                .verticalScroll(scrollState),
+                .verticalScroll(scrollState)
+                .imePadding(),   // ⭐ 手表/小屏适配：键盘弹出时内容上移可滚，输入框不被盖住
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.height(30.dp))

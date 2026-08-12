@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -726,7 +727,8 @@ fun StreamingScreen(
             Column(
                 modifier = Modifier
                     .padding(end = 16.dp)
-                    .padding(bottom = 100.dp),
+                    // ⭐ 手表/小屏适配：小屏不再为底部面板预留 100dp，否则 Zoom 控件被顶出屏
+                    .padding(bottom = if (LocalConfiguration.current.screenHeightDp < 500) 8.dp else 100.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -813,8 +815,11 @@ fun StreamingScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // ⭐ 手表/小屏适配：面板最高占屏 55%，超出部分面板内可滚（手机内容本就放得下，不受影响）
+                    .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.55f).dp)
                     .background(Color.White, RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
                     .padding(16.dp)
+                    .verticalScroll(rememberScrollState())
             ) {
                 // 灰色卡片内容
                 Column(
