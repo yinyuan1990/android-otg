@@ -640,18 +640,27 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
             Log.d("meidui", "🔗 [OTG链路|切档] ❌ 当前采集器不是 UvcVideoCapturer（未开流/旧链路），忽略 ${width}x${height}@$fps $fmtName")
             return
         }
+        val prevFormat = cap.preferredFormat
         cap.preferredFormat = format
         val capFps = (if (fps > 0) fps else maxOf(1, currentFps)).coerceIn(1, OTG_MAX_CAPTURE_FPS)
         Log.d("meidui", "🔗 [OTG链路|切档] 目标=${width}x${height}@${capFps}fps 格式=$fmtName（当前 ${currentWidth}x${currentHeight}，热控上限${thermalFpsCap}fps）")
         // ⭐ 2026-08-03 自诊断通道：切档入口（华为等 ROM 丢 Log.d，后台只能靠这条看到切了什么档）
         OtgLogReporter.diag("切档指令 目标=${width}x${height}@${capFps}fps 格式=$fmtName（当前 ${currentWidth}x${currentHeight}）")
         val changed = (width != currentWidth || height != currentHeight)
+        // ⭐ 2026-08-12：format=0(自动)视为"不指定"，不算格式变化；显式 MJPEG↔YUYV 才需要重开流
+        val formatChanged = format != 0 && format != prevFormat
         currentWidth = width
         currentHeight = height
         if (fps > 0) currentFps = minOf(capFps, thermalFpsCap).coerceAtLeast(1)
 
         if (isPreviewRunning) {
-            try {
+            if (!changed && !formatChanged) {
+                // ⭐ 2026-08-12 修「同尺寸切档也整链路重开流」（otg.log 17:59:11 实测）：
+                //   PC 重发与当前一致的档位，此前照样断流→重协商→三连补关键帧，白抖 1~2 秒画面。
+                //   现在跳过重开流，只落下面的码率/帧率/编码参数。
+                Log.d("meidui", "🔌 [OTG档位] ${width}x${height} 尺寸/格式均未变 → 跳过重开流，只更新fps/码率")
+                OtgLogReporter.diag("切档指令与当前一致（${width}x${height}）→ 跳过重开流")
+            } else try {
                 // UVC 侧重新协商（不支持的尺寸由 UvcVideoCapturer 就近选，日志里能看到实际协商值）
                 videoCapturer?.changeCaptureFormat(width, height, capFps)
                 Log.d("meidui", "🔌 [OTG档位] → ${width}x${height}@${capFps}fps（尺寸变化=$changed）")
@@ -665,28 +674,42 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         applyOtgBitrate()
         setEncodingParameters()
         forceKeyframe()
+        // ⭐ 2026-08-12：切档随档 fps 已直接落到编码器（setEncodingParameters 用的 currentFps
+        //   不再被 120 钳死），把生效推送值同步进能力快照——PC 面板照真值显示，
+        //   不必等后续 otg_fps 回包（以前这中间推流被压在 120fps，实测最长 11 秒）。
+        if (fps > 0) {
+            com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.pushFps =
+                minOf(currentFps, pushFpsHardCap(), thermalFpsCap).coerceAtLeast(1)
+        }
         // ⭐⭐ 2026-08-04 修「切档概率性卡死」（OTG 专版，华为实测）：上面这发 forceKeyframe 是
         //   切档指令处理时立刻发的，而 UVC 重开流在 uvcThread 上**异步**进行——关键帧大概率
         //   生成在旧尺寸帧上；新尺寸首批帧有没有 IDR 全看编码器重配时机，PC 解码器等不到
         //   新尺寸 IDR 就卡最后一帧（概率性）。切档后 500/1000/2000ms 三连补发，设备侧自兜底，
         //   不依赖 PC 版本（PC 侧另有 PLI 四连保险）。
-        val switchedTo = "${width}x${height}"
-        for (delayMs in longArrayOf(500L, 1000L, 2000L)) {
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                if (usingOtgCamera && currentWidth == width && currentHeight == height) {
-                    forceKeyframe()
-                    com.fz.yqlandroid.manager.OtgLogReporter.diag(
-                        "切档后+${delayMs}ms 补发关键帧（$switchedTo，防新尺寸无IDR卡死）")
-                }
-            }, delayMs)
+        //   2026-08-12：同尺寸同格式跳过重开流时没有"新尺寸无IDR"问题，三连补发也省掉。
+        if (changed || formatChanged) {
+            val switchedTo = "${width}x${height}"
+            for (delayMs in longArrayOf(500L, 1000L, 2000L)) {
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (usingOtgCamera && currentWidth == width && currentHeight == height) {
+                        forceKeyframe()
+                        com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                            "切档后+${delayMs}ms 补发关键帧（$switchedTo，防新尺寸无IDR卡死）")
+                    }
+                }, delayMs)
+            }
         }
     }
 
     /**
      * OTG 采集帧率硬上限——只挡明显离谱的值。
      * 推流上限不在这里：那个按编码器真实能力算（EncoderSizeLimits.maxFrameRate，见 setPushFps）。
+     * ⭐ 2026-08-12 120→360（otg.log 复盘）：切档指令里 PC 带的 fps=180/350 被 120 钳死 →
+     *   currentFps=120 → setEncodingParameters 把 encMax 也压到 120，要等 PC 补发 otg_fps
+     *   才恢复（实测卡了 11 秒 120fps）。描述符最高档 350fps，360 够用；推流上限仍由
+     *   编码器真实能力（otgEncoderFpsCap）和热控钳位，不受此值影响。
      */
-    private val OTG_MAX_CAPTURE_FPS = 120
+    private val OTG_MAX_CAPTURE_FPS = 360
 
     /**
      * OTG 推流帧率上限 = 编码器在当前尺寸的真实能力（查不到兜底 120）。
