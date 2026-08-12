@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -77,6 +78,10 @@ fun LoginScreen(
     
     // 获取设备ID
     val deviceId = remember { DeviceIDManager.getDeviceID(context) }
+
+    // ⭐ 手表/小屏适配：屏高 < 500dp（典型手表 300~450dp）时压缩顶部留白与 Logo，
+    //   保证账号/密码/登录按钮不用滚太远就能看到
+    val isSmallScreen = LocalConfiguration.current.screenHeightDp < 500
     
     // 加载保存的账号密码
     LaunchedEffect(Unit) {
@@ -114,21 +119,22 @@ fun LoginScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())   // ⭐ 整页可滚动：选项多时小屏也能划到底
+                .imePadding()                            // ⭐ 键盘弹出时内容上移可滚（手表小屏键盘几乎盖满屏，没它=滑不动）
                 .padding(horizontal = 22.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(60.dp))
+            Spacer(modifier = Modifier.height(if (isSmallScreen) 12.dp else 60.dp))
             
             // Logo
             Image(
                 painter = painterResource(id = R.mipmap.ic_launcher),
                 contentDescription = "Logo",
                 modifier = Modifier
-                    .size(94.dp)
+                    .size(if (isSmallScreen) 52.dp else 94.dp)
                     .clip(RoundedCornerShape(9.dp))
             )
             
-            Spacer(modifier = Modifier.height(50.dp))
+            Spacer(modifier = Modifier.height(if (isSmallScreen) 14.dp else 50.dp))
             
             // 登录表单卡片
             Card(
@@ -323,7 +329,7 @@ fun LoginScreen(
                 }
             }
             
-            Spacer(modifier = Modifier.height(30.dp))
+            Spacer(modifier = Modifier.height(if (isSmallScreen) 14.dp else 30.dp))
             
             // 错误提示
             errorMessage?.let { msg ->

@@ -3,6 +3,8 @@ package com.fz.yqlandroid.ui.screen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -125,9 +127,13 @@ fun RegisterScreen(
             // 分隔线
             HorizontalDivider(color = Color(0xFFF0F0F0))
             
-            // 输入表单
+            // 输入表单（⭐ 手表/小屏适配：整表单可滚动 + 键盘弹出时内容上移，否则小屏滑不动）
             Column(
-                modifier = Modifier.padding(horizontal = 22.dp)
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .imePadding()
+                    .padding(horizontal = 22.dp)
             ) {
                 Spacer(modifier = Modifier.height(30.dp))
                 
@@ -452,6 +458,9 @@ fun RegisterScreen(
                         }
                     }
                 }
+                
+                // 底部留白：小屏滚动到底时按钮不贴屏幕边
+                Spacer(modifier = Modifier.height(20.dp))
             }
         }
     }
