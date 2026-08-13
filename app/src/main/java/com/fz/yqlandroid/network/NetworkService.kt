@@ -635,6 +635,123 @@ object NetworkService {
         }
     }
 
+    // ==================== §60 邀请活动 + PC 下载入口 ====================
+
+    /**
+     * §60 邀请活动状态（登录成功进推流页后调用，需 JWT）
+     * GET /referral/status?variant= → {enabled, state, boundCount, successCount, tiers, remainingDays, ...}
+     * state = TRIAL_CAN_BIND（试用未绑定→邀请人输入框）/ TRIAL_BOUND（已用过邀请）/ MEMBER（打卡+领取）
+     */
+    suspend fun getReferralStatus(jwtToken: String): Result<ReferralStatus> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Referral.STATUS) + "?variant=" + APIConfig.Referral.VARIANT
+            val httpRequest = Request.Builder()
+                .url(url).get()
+                .apply {
+                    APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) }
+                    if (jwtToken.isNotEmpty()) addHeader("Authorization", "Bearer $jwtToken")
+                }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+            println("jfh [ReferralStatus] Status=${response.code}, Body=$body")
+            if (response.isSuccessful && body != null) {
+                Result.success(gson.fromJson(body, ReferralStatus::class.java))
+            } else {
+                Result.failure(Exception(parseErrorMessage(body) ?: "获取邀请状态失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * §60 试用用户填写邀请人（终身一次，绑定成功解锁体验）
+     * POST /referral/bind  body: { inviter, deviceId, variant }
+     */
+    suspend fun referralBind(inviter: String, deviceId: String, jwtToken: String): Result<ReferralActionResult> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Referral.BIND)
+            val json = gson.toJson(mapOf(
+                "inviter" to inviter,
+                "deviceId" to deviceId,
+                "variant" to APIConfig.Referral.VARIANT
+            ))
+            val httpRequest = Request.Builder()
+                .url(url).post(json.toRequestBody(JSON_MEDIA_TYPE))
+                .apply {
+                    APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) }
+                    if (jwtToken.isNotEmpty()) addHeader("Authorization", "Bearer $jwtToken")
+                }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+            println("jfh [ReferralBind] Status=${response.code}, Body=$body")
+            if (response.isSuccessful && body != null) {
+                Result.success(gson.fromJson(body, ReferralActionResult::class.java))
+            } else {
+                Result.failure(Exception(parseErrorMessage(body) ?: "绑定失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * §60 会员领取档位奖励（延长当前等级到期时间）
+     * POST /referral/claim  body: { milestone, variant }
+     */
+    suspend fun referralClaim(milestone: Int, jwtToken: String): Result<ReferralActionResult> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Referral.CLAIM)
+            val json = gson.toJson(mapOf(
+                "milestone" to milestone,
+                "variant" to APIConfig.Referral.VARIANT
+            ))
+            val httpRequest = Request.Builder()
+                .url(url).post(json.toRequestBody(JSON_MEDIA_TYPE))
+                .apply {
+                    APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) }
+                    if (jwtToken.isNotEmpty()) addHeader("Authorization", "Bearer $jwtToken")
+                }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+            println("jfh [ReferralClaim] Status=${response.code}, Body=$body")
+            if (response.isSuccessful && body != null) {
+                Result.success(gson.fromJson(body, ReferralActionResult::class.java))
+            } else {
+                Result.failure(Exception(parseErrorMessage(body) ?: "领取失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * §60 PC 端下载入口配置（公开接口，「我的」页入口用）
+     * GET /config/pcdl?variant= → { enabled, url, content }
+     */
+    suspend fun getPcDownload(): Result<PcdlConfig> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Referral.PCDL) + "?variant=" + APIConfig.Referral.VARIANT
+            val httpRequest = Request.Builder()
+                .url(url).get()
+                .apply { APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) } }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+            println("jfh [Pcdl] Status=${response.code}, Body=$body")
+            if (response.isSuccessful && body != null) {
+                Result.success(gson.fromJson(body, PcdlConfig::class.java))
+            } else {
+                Result.failure(Exception("获取下载信息失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // ========== 工具方法 ==========
     
     /**
@@ -780,6 +897,52 @@ data class LoginAdConfig(
     val enabled: Boolean = false,
     val title: String? = null,
     val version: Long = 0
+)
+
+/**
+ * §60 邀请活动状态（登录弹层用）
+ */
+data class ReferralTier(
+    val count: Int = 0,               // 第几人档
+    val months: Int = 0,              // 本档新增月数
+    val cumulativeMonths: Int = 0,    // 累计月数
+    val status: String = "LOCKED"     // LOCKED / ACHIEVED / CLAIMABLE / CLAIMED
+)
+
+data class ReferralStatus(
+    val enabled: Boolean = false,
+    val state: String? = null,        // MEMBER / TRIAL_CAN_BIND / TRIAL_BOUND
+    val popupContent: String? = null, // 活动说明文案（总后台可配）
+    val trialHours: Int = 24,
+    val remainingDays: Long = 0,      // 当前等级剩余天数（个人中心显示）
+    val level: Int? = null,
+    val expireAt: String? = null,
+    val referralTrialActive: Boolean = false,
+    val boundCount: Int = 0,          // 已邀请 n 人
+    val successCount: Int = 0,        // 成功解锁 m 人
+    val tiers: List<ReferralTier>? = null
+)
+
+/**
+ * §60 绑定/领取结果
+ */
+data class ReferralActionResult(
+    val success: Boolean = false,
+    val message: String? = null,
+    val trialLevel: Int? = null,
+    val trialExpireAt: String? = null,
+    val months: Int? = null,
+    val expireAt: String? = null,
+    val remainingDays: Long? = null
+)
+
+/**
+ * §60 PC 端下载入口配置
+ */
+data class PcdlConfig(
+    val enabled: Boolean = false,
+    val url: String? = null,
+    val content: String? = null
 )
 
 /**

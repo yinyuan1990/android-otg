@@ -82,6 +82,14 @@ object APIConfig {
         const val LOGIN_AD = "/config/login-ad"                  // §59 登录广告配置（公开接口）
         const val LOGIN_AD_PAGE = "/config/login-ad/page"        // §59 广告 HTML 页（WebView 直接加载）
     }
+
+    object Referral {
+        const val VARIANT = "otg"                                // §60 变体：OTG 版="otg"（主版为 ""），后端两套配置独立
+        const val STATUS = "/referral/status"                    // §60 登录弹层三态+打卡+档位（需 JWT）
+        const val BIND = "/referral/bind"                        // §60 试用用户填写邀请人（终身一次）
+        const val CLAIM = "/referral/claim"                      // §60 会员领取档位奖励
+        const val PCDL = "/config/pcdl"                          // §60 PC 端下载入口配置（公开接口，OTG 版下发 PC-OTG 专版直链）
+    }
     
     // MARK: - 完整URL生成方法
     

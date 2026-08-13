@@ -66,6 +66,11 @@ fun ProfileScreen(
     // 🔥 用户资料（对标 iOS ProfileViewModel.loadUserProfile）
     var userProfile by remember { mutableStateOf<com.fz.yqlandroid.network.UserProfileResponse?>(null) }
     
+    // ⭐ §60：邀请活动状态（当前等级剩余天数）+ PC 端下载入口配置
+    var referralInfo by remember { mutableStateOf<com.fz.yqlandroid.network.ReferralStatus?>(null) }
+    var pcdlConfig by remember { mutableStateOf<com.fz.yqlandroid.network.PcdlConfig?>(null) }
+    var showPcdlDialog by remember { mutableStateOf(false) }
+    
     // 对话框状态
     var showLogoutDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -89,6 +94,16 @@ fun ProfileScreen(
             com.fz.yqlandroid.network.NetworkService.getUserProfile(jwtToken)
                 .onSuccess { userProfile = it }
         }
+    }
+    
+    // ⭐ §60：加载邀请状态（剩余天数）+ PC 下载入口配置（失败均静默，不影响页面）
+    LaunchedEffect(Unit) {
+        if (jwtToken.isNotEmpty()) {
+            com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
+                .onSuccess { referralInfo = it }
+        }
+        com.fz.yqlandroid.network.NetworkService.getPcDownload()
+            .onSuccess { pcdlConfig = it }
     }
     
     // 🔥 等级显示（对标 iOS levelDisplayText：activated + activation_level）
@@ -197,6 +212,56 @@ fun ProfileScreen(
                     deleteError = null
                 }) {
                     Text("取消")
+                }
+            }
+        )
+    }
+    
+    // ⭐ §60：PC 端下载弹框（主推复制直链；「浏览器打开」为次选）
+    if (showPcdlDialog) {
+        val pcdlUrl = pcdlConfig?.url ?: ""
+        AlertDialog(
+            onDismissRequest = { showPcdlDialog = false },
+            title = { Text("电脑版下载") },
+            text = {
+                Column {
+                    Text(
+                        pcdlConfig?.content?.ifBlank { null }
+                            ?: "复制下载地址后，粘贴到电脑浏览器地址栏，即可直接下载安装程序。",
+                        fontSize = 14.sp, color = Color(0xFF1A1A1A)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        pcdlUrl,
+                        fontSize = 12.sp,
+                        color = Color(0xFF007AFF),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFF2F2F7), RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("pcdl", pcdlUrl))
+                        android.widget.Toast.makeText(context, "下载地址已复制，请到电脑浏览器粘贴下载", android.widget.Toast.LENGTH_LONG).show()
+                    } catch (_: Exception) { /* 剪贴板异常静默 */ }
+                }) { Text("复制下载地址", fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        try {
+                            context.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(pcdlUrl))
+                                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (_: Exception) { /* 无浏览器可用时静默 */ }
+                    }) { Text("浏览器打开", color = Color(0xFF666666)) }
+                    TextButton(onClick = { showPcdlDialog = false }) { Text("关闭", color = Color.Gray) }
                 }
             }
         )
@@ -322,6 +387,20 @@ fun ProfileScreen(
                     color = Color(0xFFF0F0F0)
                 )
                 
+                // ⭐ §60：当前等级剩余天数（activationExpireAt 换算，活动接口下发；未开通/接口未回不显示）
+                if (activated && (referralInfo?.remainingDays ?: 0) > 0) {
+                    ProfileRow(
+                        icon = Icons.Default.Schedule,
+                        title = "剩余天数",
+                        subtitle = "${referralInfo!!.remainingDays} 天",
+                        onClick = { }
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 60.dp),
+                        color = Color(0xFFF0F0F0)
+                    )
+                }
+                
                 ProfileRow(
                     icon = Icons.Default.Search,
                     title = "扫一扫",
@@ -400,6 +479,20 @@ fun ProfileScreen(
                     title = "问题反馈",
                     onClick = { onNavigateToMessage() }
                 )
+                
+                // ⭐ §60：PC 端下载入口（总后台开关+直链可配；所有用户可见，主推「复制下载地址→电脑浏览器粘贴」）
+                if (pcdlConfig?.enabled == true && !pcdlConfig?.url.isNullOrBlank()) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 60.dp),
+                        color = Color(0xFFF0F0F0)
+                    )
+                    ProfileRow(
+                        icon = Icons.Default.Computer,
+                        title = "电脑版下载",
+                        subtitle = "复制下载地址，电脑浏览器粘贴即可下载",
+                        onClick = { showPcdlDialog = true }
+                    )
+                }
             }
             
             Spacer(modifier = Modifier.height(30.dp))

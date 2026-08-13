@@ -122,6 +122,14 @@ fun StreamingScreen(
     var showLoginAdDialog by remember { mutableStateOf(false) }
     var loginAdTitle by remember { mutableStateOf("公告") }
     var loginAdVersion by remember { mutableStateOf(0L) }
+
+    // ⭐ §60：邀请活动弹层（登录后按用户状态三态展示：试用未绑定=邀请人输入框 / 试用已绑定=已用过邀请 / 会员=打卡+领取）
+    var showReferralDialog by remember { mutableStateOf(false) }
+    var referralStatus by remember { mutableStateOf<com.fz.yqlandroid.network.ReferralStatus?>(null) }
+    var referralInviterInput by remember { mutableStateOf("") }
+    var referralBusy by remember { mutableStateOf(false) }
+    var referralError by remember { mutableStateOf<String?>(null) }
+    var referralNotice by remember { mutableStateOf<String?>(null) }
     // ⭐ 需求#3（2026-07-31）：小米后台推流引导（自启动+省电策略无 API，只能引导用户手动开）
     var showXiaomiGuide by remember { mutableStateOf(false) }
     var connectionStatus by remember { mutableStateOf("未连接") }
@@ -305,6 +313,22 @@ fun StreamingScreen(
                         loginAdTitle = ad.title ?: "公告"
                         loginAdVersion = ad.version
                         showLoginAdDialog = true
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 拉取失败不拦截使用 */ }
+    }
+
+    // ⭐ §60：登录后拉邀请活动状态（需 JWT）——活动开启则弹三态弹层（复用广告弹层的登录后触发时机）
+    LaunchedEffect(Unit) {
+        try {
+            val jwtToken = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                .getString("jwt_token", "") ?: ""
+            if (jwtToken.isNotEmpty()) {
+                com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken).onSuccess { st ->
+                    if (st.enabled && st.state != null) {
+                        referralStatus = st
+                        showReferralDialog = true
                     }
                 }
             }
@@ -695,6 +719,203 @@ fun StreamingScreen(
                                     .edit().putLong("login_ad_read_version", loginAdVersion).apply()
                                 showLoginAdDialog = false
                             }) { Text("已读，不再提醒") }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ⭐ §60：邀请活动弹层（登录后三态：试用未绑定=填邀请人 / 试用已绑定=已用过邀请+活动预览 / 会员=打卡+档位领取）
+        if (showReferralDialog && referralStatus != null) {
+            val st = referralStatus!!
+            val isMember = st.state == "MEMBER"
+            val refreshReferral: () -> Unit = {
+                scope.launch {
+                    val jwt = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                        .getString("jwt_token", "") ?: ""
+                    com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwt)
+                        .onSuccess { referralStatus = it }
+                }
+            }
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = { showReferralDialog = false },
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .fillMaxHeight(0.78f),
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.White
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                if (isMember) "🎁 邀请打卡" else "🎁 邀请有礼",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 17.sp,
+                                color = Color.Black,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        HorizontalDivider(color = Color(0xFFEEEEEE))
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            // 活动说明（总后台可配文案）
+                            if (!st.popupContent.isNullOrBlank()) {
+                                Text(st.popupContent!!, fontSize = 13.sp, color = Color(0xFF666666), lineHeight = 19.sp)
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
+                            when (st.state) {
+                                "TRIAL_CAN_BIND" -> {
+                                    Text("填写邀请人（会员的昵称或完整账号），即可解锁全部功能体验 ${st.trialHours} 小时",
+                                        fontSize = 14.sp, color = Color(0xFF1A1A1A), lineHeight = 20.sp)
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    OutlinedTextField(
+                                        value = referralInviterInput,
+                                        onValueChange = { referralInviterInput = it; referralError = null },
+                                        label = { Text("邀请人昵称 / 完整账号") },
+                                        singleLine = true,
+                                        enabled = !referralBusy,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("⚠️ 邀请号终身只能选择一次，提交后不可更改",
+                                        fontSize = 13.sp, color = Color(0xFFE6432D), fontWeight = FontWeight.Medium)
+                                    if (referralError != null) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Text(referralError!!, fontSize = 13.sp, color = Color.Red)
+                                    }
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Button(
+                                        onClick = {
+                                            val input = referralInviterInput.trim()
+                                            if (input.isEmpty()) { referralError = "请输入邀请人的昵称或完整账号"; return@Button }
+                                            referralBusy = true
+                                            referralError = null
+                                            scope.launch {
+                                                val prefs = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                                                val jwt = prefs.getString("jwt_token", "") ?: ""
+                                                val devId = com.fz.yqlandroid.manager.DeviceIDManager.getDeviceID(context)
+                                                com.fz.yqlandroid.network.NetworkService.referralBind(input, devId, jwt)
+                                                    .onSuccess { r ->
+                                                        referralBusy = false
+                                                        referralNotice = r.message ?: "绑定成功！"
+                                                        refreshReferral()
+                                                    }
+                                                    .onFailure { e ->
+                                                        referralBusy = false
+                                                        referralError = e.message ?: "绑定失败，请重试"
+                                                    }
+                                            }
+                                        },
+                                        enabled = !referralBusy,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text(if (referralBusy) "提交中..." else "确认绑定") }
+                                }
+                                "TRIAL_BOUND" -> {
+                                    Text("✅ 您已使用过邀请（终身一次）", fontSize = 14.sp, color = Color(0xFF34C759), fontWeight = FontWeight.Medium)
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text("解锁等级后即可作为邀请人参加活动，邀请好友赢会员时长", fontSize = 13.sp, color = Color(0xFF666666))
+                                }
+                                "MEMBER" -> {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("${st.boundCount}", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF007AFF))
+                                            Text("已邀请（人）", fontSize = 12.sp, color = Color(0xFF999999))
+                                        }
+                                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("${st.successCount}", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF6B00))
+                                            Text("成功解锁（人）", fontSize = 12.sp, color = Color(0xFF999999))
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text("好友通过邀请绑定并付费解锁等级后计一次成功，达档可领取会员时长",
+                                        fontSize = 12.sp, color = Color(0xFF999999), lineHeight = 17.sp)
+                                }
+                            }
+                            if (referralNotice != null) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(referralNotice!!, fontSize = 13.sp, color = Color(0xFF34C759), fontWeight = FontWeight.Medium)
+                            }
+                            // 奖励档位列表（三态都展示；试用标注"解锁等级后可领"）
+                            val tiers = st.tiers ?: emptyList()
+                            if (tiers.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text("奖励档位", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.Black)
+                                if (!isMember) {
+                                    Text("（解锁等级后才可参加领取）", fontSize = 12.sp, color = Color(0xFF999999))
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                tiers.forEach { tier ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "邀请成功 ${tier.count} 人",
+                                            fontSize = 14.sp, color = Color(0xFF1A1A1A),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            if (tier.months > 0) "+${tier.months} 个月" else "已封顶",
+                                            fontSize = 13.sp,
+                                            color = if (tier.months > 0) Color(0xFFFF6B00) else Color(0xFF999999)
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        when (tier.status) {
+                                            "CLAIMED" -> Text("已领取", fontSize = 13.sp, color = Color(0xFF34C759))
+                                            "CLAIMABLE" -> TextButton(
+                                                enabled = !referralBusy,
+                                                onClick = {
+                                                    referralBusy = true
+                                                    scope.launch {
+                                                        val jwt = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                                                            .getString("jwt_token", "") ?: ""
+                                                        com.fz.yqlandroid.network.NetworkService.referralClaim(tier.count, jwt)
+                                                            .onSuccess { r ->
+                                                                referralBusy = false
+                                                                referralNotice = r.message ?: "领取成功！"
+                                                                refreshReferral()
+                                                            }
+                                                            .onFailure { e ->
+                                                                referralBusy = false
+                                                                referralNotice = null
+                                                                referralError = e.message
+                                                            }
+                                                    }
+                                                }
+                                            ) { Text("领取", fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+                                            "ACHIEVED" -> Text("已达成", fontSize = 13.sp, color = Color(0xFF007AFF))
+                                            else -> Text("未达成", fontSize = 13.sp, color = Color(0xFFBBBBBB))
+                                        }
+                                    }
+                                    HorizontalDivider(color = Color(0xFFF5F5F5))
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = Color(0xFFEEEEEE))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(onClick = { showReferralDialog = false }) {
+                                Text("关闭", color = Color.Gray)
+                            }
                         }
                     }
                 }
