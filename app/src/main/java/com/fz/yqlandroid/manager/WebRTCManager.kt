@@ -755,8 +755,10 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         //   PC 面板显示"本档上限 1000kbps"而设备实际按 667 算，两边对不上；
         //   而且帧率降了码率再降 = 双重惩罚，编码器自己的码控本就会处理。
         val entry = caps?.sizes?.firstOrNull { it.width == currentWidth && it.height == currentHeight }
+        // §63：没见过的分辨率（快照里没有）兜底改按当前实跑帧率算（原来传 0=按 30 算，
+        //   实跑高帧时上限被低估一半）；快照主路径仍刻意不跟实时 fps 联动（见上方注释）
         val ceiling = entry?.maxKbps?.takeIf { it > 0 }
-            ?: com.fz.yqlandroid.manager.uvc.OtgBitratePlan.ceilingFor(currentWidth, currentHeight, 0)
+            ?: com.fz.yqlandroid.manager.uvc.OtgBitratePlan.ceilingFor(currentWidth, currentHeight, currentFps)
         val targetKbps = (ceiling * otgQualityPercent / 100)
             .coerceAtLeast(com.fz.yqlandroid.manager.uvc.OtgBitratePlan.MIN_KBPS)
         setMaxBitrateKbps(targetKbps)
