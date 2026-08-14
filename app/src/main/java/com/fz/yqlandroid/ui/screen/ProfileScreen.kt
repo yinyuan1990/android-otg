@@ -408,17 +408,7 @@ fun ProfileScreen(
                     onClick = { onNavigateToScan() }
                 )
                 
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 60.dp),
-                    color = Color(0xFFF0F0F0)
-                )
-                
-                ProfileRow(
-                    icon = Icons.Default.Link,
-                    title = "已绑定控制端",
-                    subtitle = "查看并解绑已绑定的控制端",
-                    onClick = { onNavigateToBindingList() }
-                )
+                // §61（2026-08-14）：「已绑定控制端」入口按需求移除（BindingListScreen 及导航保留，入口不可达）
                 
                 HorizontalDivider(
                     modifier = Modifier.padding(start = 60.dp),
