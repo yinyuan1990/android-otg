@@ -414,8 +414,10 @@ fun ProfileScreen(
                             tint = levelColor
                         )
                         Spacer(modifier = Modifier.width(4.dp))
+                        // ⭐ §62.4：等级徽标直接带剩余天数（数据=活动接口 remainingDays，领奖后刷新即对应）
+                        val badgeDays = referralInfo?.remainingDays ?: 0
                         Text(
-                            text = levelText,
+                            text = if (activated && badgeDays > 0) "$levelText · 剩余 $badgeDays 天" else levelText,
                             fontSize = 12.sp,
                             color = Color(0xFF1A1A1A)
                         )
@@ -438,16 +440,17 @@ fun ProfileScreen(
                 //   ② **不显示开通时间**，只显示账号注册时间——应用商店审核对"开通/付费"类信息敏感，
                 //      不暴露任何与购买/激活时点相关的内容。
                 val registeredAt = formatProfileDate(userProfile?.createdAt)
-                // ⭐ §62：剩余天数并入等级行（数据=活动接口 remainingDays，领取奖励后刷新即对应），原 §60 独立行删除
+                // ⭐ §62.4：剩余天数直接跟在等级名后（标题=「<等级>（剩余 N 天）」），数据=活动接口
+                //   remainingDays（领取奖励后刷新即对应），原 §60 独立「剩余天数」行删除
                 val remainingDays = referralInfo?.remainingDays ?: 0
                 ProfileRow(
                     icon = Icons.Default.DateRange,
-                    title = if (activated) levelText else "注册时间",
-                    subtitle = when {
-                        activated && remainingDays > 0 -> "剩余 $remainingDays 天 · 注册成功时间 $registeredAt"
-                        activated -> "注册成功时间 $registeredAt"
-                        else -> registeredAt
+                    title = when {
+                        activated && remainingDays > 0 -> "$levelText（剩余 $remainingDays 天）"
+                        activated -> levelText
+                        else -> "注册时间"
                     },
+                    subtitle = if (activated) "注册成功时间 $registeredAt" else registeredAt,
                     onClick = { }
                 )
                 
