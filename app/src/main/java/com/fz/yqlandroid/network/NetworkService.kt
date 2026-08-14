@@ -729,6 +729,34 @@ object NetworkService {
     }
 
     /**
+     * §62 使用日卡（「我的」页二级确认后调用，从确定那一刻起生效 trialHours 小时）
+     * POST /referral/trial/use  body: { variant }
+     */
+    suspend fun referralTrialUse(jwtToken: String): Result<ReferralActionResult> = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Referral.TRIAL_USE)
+            val json = gson.toJson(mapOf("variant" to APIConfig.Referral.VARIANT))
+            val httpRequest = Request.Builder()
+                .url(url).post(json.toRequestBody(JSON_MEDIA_TYPE))
+                .apply {
+                    APIConfig.defaultHeaders.forEach { (k, v) -> addHeader(k, v) }
+                    if (jwtToken.isNotEmpty()) addHeader("Authorization", "Bearer $jwtToken")
+                }
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+            println("jfh [ReferralTrialUse] Status=${response.code}, Body=$body")
+            if (response.isSuccessful && body != null) {
+                Result.success(gson.fromJson(body, ReferralActionResult::class.java))
+            } else {
+                Result.failure(Exception(parseErrorMessage(body) ?: "使用日卡失败: ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
      * §60 PC 端下载入口配置（公开接口，「我的」页入口用）
      * GET /config/pcdl?variant= → { enabled, url, content }
      */
@@ -914,6 +942,7 @@ data class ReferralStatus(
     val state: String? = null,        // MEMBER / TRIAL_CAN_BIND / TRIAL_BOUND
     val popupContent: String? = null, // 活动说明文案（总后台可配）
     val trialHours: Int = 24,
+    val trialCardPending: Boolean = false,  // §62 日卡已领未用（「我的」页显示「日卡」行）
     val remainingDays: Long = 0,      // 当前等级剩余天数（个人中心显示）
     val level: Int? = null,
     val expireAt: String? = null,

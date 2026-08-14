@@ -71,6 +71,11 @@ fun ProfileScreen(
     var pcdlConfig by remember { mutableStateOf<com.fz.yqlandroid.network.PcdlConfig?>(null) }
     var showPcdlDialog by remember { mutableStateOf(false) }
     
+    // ⭐ §62：日卡（邀请奖励，已领未用时显示；点确定二级确认后生效，从确定那一刻起算）
+    var showTrialCardDialog by remember { mutableStateOf(false) }
+    var trialCardBusy by remember { mutableStateOf(false) }
+    var trialCardResult by remember { mutableStateOf<String?>(null) }
+    
     // 对话框状态
     var showLogoutDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -267,6 +272,64 @@ fun ProfileScreen(
         )
     }
     
+    // ⭐ §62：日卡二级确认弹框（确定那一刻起生效；自行开通会员则以开通为准）
+    if (showTrialCardDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!trialCardBusy) showTrialCardDialog = false },
+            title = { Text("使用日卡") },
+            text = {
+                Text(
+                    "确定后立即生效，自确定那一刻起可体验全部功能 ${referralInfo?.trialHours ?: 24} 小时。\n\n" +
+                    "若您已自行开通会员，以开通等级为准，未使用完的日使用将被直接覆盖。",
+                    fontSize = 14.sp, color = Color(0xFF1A1A1A), lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !trialCardBusy,
+                    onClick = {
+                        trialCardBusy = true
+                        scope.launch {
+                            com.fz.yqlandroid.network.NetworkService.referralTrialUse(jwtToken)
+                                .onSuccess { r ->
+                                    trialCardBusy = false
+                                    showTrialCardDialog = false
+                                    trialCardResult = r.message ?: "日卡已生效！"
+                                    // 刷新邀请状态（隐藏日卡行、剩余天数更新）
+                                    com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
+                                        .onSuccess { referralInfo = it }
+                                }
+                                .onFailure { e ->
+                                    trialCardBusy = false
+                                    showTrialCardDialog = false
+                                    trialCardResult = e.message ?: "使用日卡失败，请重试"
+                                    com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
+                                        .onSuccess { referralInfo = it }
+                                }
+                        }
+                    }
+                ) { Text(if (trialCardBusy) "生效中..." else "确定使用", fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(enabled = !trialCardBusy, onClick = { showTrialCardDialog = false }) {
+                    Text("暂不使用", color = Color.Gray)
+                }
+            }
+        )
+    }
+    
+    // ⭐ §62：日卡结果提示
+    if (trialCardResult != null) {
+        AlertDialog(
+            onDismissRequest = { trialCardResult = null },
+            title = { Text("日卡") },
+            text = { Text(trialCardResult!!, fontSize = 14.sp) },
+            confirmButton = {
+                TextButton(onClick = { trialCardResult = null }) { Text("确定") }
+            }
+        )
+    }
+    
     Scaffold(
         topBar = {
             TopAppBar(
@@ -375,10 +438,16 @@ fun ProfileScreen(
                 //   ② **不显示开通时间**，只显示账号注册时间——应用商店审核对"开通/付费"类信息敏感，
                 //      不暴露任何与购买/激活时点相关的内容。
                 val registeredAt = formatProfileDate(userProfile?.createdAt)
+                // ⭐ §62：剩余天数并入等级行（数据=活动接口 remainingDays，领取奖励后刷新即对应），原 §60 独立行删除
+                val remainingDays = referralInfo?.remainingDays ?: 0
                 ProfileRow(
                     icon = Icons.Default.DateRange,
                     title = if (activated) levelText else "注册时间",
-                    subtitle = if (activated) "注册成功时间 $registeredAt" else registeredAt,
+                    subtitle = when {
+                        activated && remainingDays > 0 -> "剩余 $remainingDays 天 · 注册成功时间 $registeredAt"
+                        activated -> "注册成功时间 $registeredAt"
+                        else -> registeredAt
+                    },
                     onClick = { }
                 )
                 
@@ -387,13 +456,14 @@ fun ProfileScreen(
                     color = Color(0xFFF0F0F0)
                 )
                 
-                // ⭐ §60：当前等级剩余天数（activationExpireAt 换算，活动接口下发；未开通/接口未回不显示）
-                if (activated && (referralInfo?.remainingDays ?: 0) > 0) {
+                // ⭐ §62：日卡（邀请奖励，已领未用才显示；点击弹二级确认，确定那一刻起生效）
+                if (referralInfo?.trialCardPending == true) {
                     ProfileRow(
-                        icon = Icons.Default.Schedule,
-                        title = "剩余天数",
-                        subtitle = "${referralInfo!!.remainingDays} 天",
-                        onClick = { }
+                        icon = Icons.Default.CardGiftcard,
+                        title = "日卡（邀请奖励）",
+                        subtitle = "未使用，点击立即使用（生效 ${referralInfo?.trialHours ?: 24} 小时）",
+                        titleColor = Color(0xFFE6432D),
+                        onClick = { showTrialCardDialog = true }
                     )
                     HorizontalDivider(
                         modifier = Modifier.padding(start = 60.dp),
@@ -467,6 +537,7 @@ fun ProfileScreen(
                 ProfileRow(
                     icon = Icons.Default.Email,
                     title = "问题反馈",
+                    titleColor = Color(0xFFE6432D),   // §62 标红
                     onClick = { onNavigateToMessage() }
                 )
                 
@@ -480,6 +551,7 @@ fun ProfileScreen(
                         icon = Icons.Default.Computer,
                         title = "电脑版下载",
                         subtitle = "复制下载地址，电脑浏览器粘贴即可下载",
+                        titleColor = Color(0xFFE6432D),   // §62 标红
                         onClick = { showPcdlDialog = true }
                     )
                 }
@@ -536,6 +608,7 @@ private fun ProfileRow(
     icon: ImageVector,
     title: String,
     subtitle: String? = null,
+    titleColor: Color = Color(0xFF1A1A1A),   // §62：支持标红（问题反馈/电脑版下载/日卡）
     onClick: () -> Unit
 ) {
     Row(
@@ -560,7 +633,7 @@ private fun ProfileRow(
             Text(
                 text = title,
                 fontSize = 16.sp,
-                color = Color(0xFF1A1A1A)
+                color = titleColor
             )
             if (subtitle != null) {
                 Text(

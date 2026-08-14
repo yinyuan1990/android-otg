@@ -771,6 +771,24 @@ fun StreamingScreen(
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 16.dp, vertical = 12.dp)
                         ) {
+                            // ⭐ §62：固定三句话（① 红色加大 ② 绿色 ③ 默认色）
+                            Text(
+                                "邀请奖励(邀请人必须解锁等级才可以参加以下奖励)",
+                                fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE6432D), lineHeight = 22.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "新用户 输入当前手机端账号前8位 即可完成邀请。",
+                                fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                                color = Color(0xFF34C759), lineHeight = 20.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "邀请成功新用户即可领取日卡一张(可稍后使用)",
+                                fontSize = 14.sp, color = Color(0xFF1A1A1A), lineHeight = 20.sp
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
                             // 活动说明（总后台可配文案）
                             if (!st.popupContent.isNullOrBlank()) {
                                 Text(st.popupContent!!, fontSize = 13.sp, color = Color(0xFF666666), lineHeight = 19.sp)
@@ -778,13 +796,13 @@ fun StreamingScreen(
                             }
                             when (st.state) {
                                 "TRIAL_CAN_BIND" -> {
-                                    Text("填写邀请人（会员的昵称或完整账号），即可解锁全部功能体验 ${st.trialHours} 小时",
+                                    Text("填写邀请人（手机端账号前8位 / 昵称 / 完整账号），邀请成功可领取日卡一张（全部功能体验 ${st.trialHours} 小时，可稍后到「我的」页使用）",
                                         fontSize = 14.sp, color = Color(0xFF1A1A1A), lineHeight = 20.sp)
                                     Spacer(modifier = Modifier.height(10.dp))
                                     OutlinedTextField(
                                         value = referralInviterInput,
                                         onValueChange = { referralInviterInput = it; referralError = null },
-                                        label = { Text("邀请人昵称 / 完整账号") },
+                                        label = { Text("邀请人账号前8位 / 昵称 / 完整账号") },
                                         singleLine = true,
                                         enabled = !referralBusy,
                                         modifier = Modifier.fillMaxWidth()
@@ -800,7 +818,7 @@ fun StreamingScreen(
                                     Button(
                                         onClick = {
                                             val input = referralInviterInput.trim()
-                                            if (input.isEmpty()) { referralError = "请输入邀请人的昵称或完整账号"; return@Button }
+                                            if (input.isEmpty()) { referralError = "请输入邀请人的账号前8位、昵称或完整账号"; return@Button }
                                             referralBusy = true
                                             referralError = null
                                             scope.launch {
@@ -864,13 +882,14 @@ fun StreamingScreen(
                                             .padding(vertical = 6.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        // §62 文字口径：档位=邀请解锁成功、奖励显示累计月数（cumulativeMonths），领取逻辑不变
                                         Text(
-                                            "邀请成功 ${tier.count} 人",
+                                            "邀请解锁成功 ${tier.count} 人",
                                             fontSize = 14.sp, color = Color(0xFF1A1A1A),
                                             modifier = Modifier.weight(1f)
                                         )
                                         Text(
-                                            if (tier.months > 0) "+${tier.months} 个月" else "已封顶",
+                                            if (tier.months > 0) "奖励时长 增加至${tier.cumulativeMonths}个月" else "已封顶",
                                             fontSize = 13.sp,
                                             color = if (tier.months > 0) Color(0xFFFF6B00) else Color(0xFF999999)
                                         )

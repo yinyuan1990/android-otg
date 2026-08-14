@@ -88,6 +88,7 @@ object APIConfig {
         const val STATUS = "/referral/status"                    // §60 登录弹层三态+打卡+档位（需 JWT）
         const val BIND = "/referral/bind"                        // §60 试用用户填写邀请人（终身一次）
         const val CLAIM = "/referral/claim"                      // §60 会员领取档位奖励
+        const val TRIAL_USE = "/referral/trial/use"              // §62 使用日卡（「我的」页二级确认后调用，从确定那一刻起生效）
         const val PCDL = "/config/pcdl"                          // §60 PC 端下载入口配置（公开接口，OTG 版下发 PC-OTG 专版直链）
     }
     
