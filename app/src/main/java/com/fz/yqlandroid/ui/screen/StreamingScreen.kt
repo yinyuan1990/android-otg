@@ -840,6 +840,14 @@ fun StreamingScreen(
                                         enabled = !referralBusy,
                                         modifier = Modifier.fillMaxWidth()
                                     ) { Text(if (referralBusy) "提交中..." else "确认绑定") }
+                                    // ⭐ §64.2：确认绑定下方红色大号提示（奖励归属说明）
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        "邀请人填谁账号 以下奖励赠送给谁",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFE6432D)
+                                    )
                                 }
                                 "TRIAL_BOUND" -> {
                                     Text("✅ 您已使用过邀请（终身一次）", fontSize = 14.sp, color = Color(0xFF34C759), fontWeight = FontWeight.Medium)
@@ -888,8 +896,9 @@ fun StreamingScreen(
                                             fontSize = 14.sp, color = Color(0xFF1A1A1A),
                                             modifier = Modifier.weight(1f)
                                         )
+                                        // §64.2：单位从"月"改"天"（后端 plusDays，字段名不变、数值即天数）
                                         Text(
-                                            if (tier.months > 0) "奖励时长 增加至${tier.cumulativeMonths}个月" else "已封顶",
+                                            if (tier.months > 0) "奖励时长 增加至${tier.cumulativeMonths}天" else "已封顶",
                                             fontSize = 13.sp,
                                             color = if (tier.months > 0) Color(0xFFFF6B00) else Color(0xFF999999)
                                         )
