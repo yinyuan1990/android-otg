@@ -71,10 +71,11 @@ fun ChangePasswordScreen(
 
     fun submit() {
         // 校验（与iOS handleChangePassword 一致）
-        // ⭐ 需求#2（2026-07-31）：不再要求输入原绑定码（管理密码）——已登录 + 原登录密码校验足够，
-        //   后端已改为可选（oldSecondaryPassword 传空即跳过校验）。
+        // ⭐ §64（2026-08-15）：恢复「原绑定码」必填（2026-07-31 需求#2曾移除）——
+        //   后端 /user/password/all 对非空原绑定码照旧强校验，传错拦截。
         when {
             oldPassword.isEmpty() -> { showError("无法获取原登录密码，请重新登录后再试"); return }
+            oldSecondaryPassword.isEmpty() -> { showError("请输入原绑定码"); return }
             newPassword.isEmpty() -> { showError("请输入新登录密码"); return }
             newPassword.length !in 6..20 -> { showError("新登录密码长度必须在6-20位之间"); return }
             oldPassword == newPassword -> { showError("新登录密码不能与原登录密码相同"); return }
@@ -166,7 +167,9 @@ fun ChangePasswordScreen(
                     .clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFFF4F4F8))
             ) {
-                // ⭐ 需求#2：原绑定码输入行已移除（oldSecondaryPassword 恒为空串）
+                // ⭐ §64：恢复「原绑定码」输入行（必填，后端强校验）
+                PasswordInputRow("原绑定码", "请输入原绑定码", oldSecondaryPassword, !isChanging) { oldSecondaryPassword = it }
+                HorizontalDivider(modifier = Modifier.padding(start = 96.dp), color = Color(0xFFE5E5EA))
                 PasswordInputRow("新登录密码", "请输入新登录密码（6-20位）", newPassword, !isChanging) { newPassword = it }
                 HorizontalDivider(modifier = Modifier.padding(start = 96.dp), color = Color(0xFFE5E5EA))
                 PasswordInputRow("新绑定码", "请输入新绑定码（6-20位）", newSecondaryPassword, !isChanging) { newSecondaryPassword = it }
