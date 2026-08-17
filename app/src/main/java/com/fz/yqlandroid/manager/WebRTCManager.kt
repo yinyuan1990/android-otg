@@ -496,15 +496,24 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         //    注：慢门/快门(cjfps)由 SENSOR_EXPOSURE_TIME 单独控制，不依赖高采集帧率。
         // 2026-07-06 用户要求：采集帧率标准从 60 降到 30（每档实采 = min(30, 分辨率上限, 整机maxFps)）。
         //    连带效果：推送基准 basePushFps=min(preset.fps=30, maxPushFps, 后端目标) 也随之 ≤30。
-        val desiredFps = 30
+        // ⭐ §77：后端可覆盖（运营配置→App配置→视频码率档位→采集目标帧率），0/未配=沿用 30
+        val desiredFps = LadderConfigStore.remoteCaptureFps.takeIf { it > 0 } ?: 30
         
         // 每档独立按 iOS 目标分辨率就近选取设备实际采集分辨率（直接采集，scaleDown=1.0）
         // 🔥 选档时“60fps 优先”：优先在能跑 60fps 的分辨率里就近选，没有 60 才退回 30。
+        // ⭐ §77：目标分辨率后端可覆盖（留空/0=用 iosTargets 内置值）
         fun nearest(profile: LadderProfile): Size {
-            val (tw, th, is169) = iosTargets[profile]!!
+            val (defW, defH, is169) = iosTargets[profile]!!
+            val cfg = LadderConfigStore.entryOf(profile)
+            val tw = if (cfg.w > 0) cfg.w else defW
+            val th = if (cfg.h > 0) cfg.h else defH
+            // 目标比例跟着实际目标分辨率走：否则后台把 ultra 从 1280x720 改成 4:3 尺寸后，
+            // 这里仍按 16:9 就近匹配，会选到一个跟目标完全不搭的采集分辨率
+            val ratio = if (cfg.w > 0 && cfg.h > 0) cfg.w.toDouble() / cfg.h
+                        else if (is169) 16.0 / 9.0 else 4.0 / 3.0
             return findBestResolution(
                 formats, tw, th,
-                if (is169) 16.0 / 9.0 else 4.0 / 3.0,
+                ratio,
                 sizeMaxFps, desiredFps,
                 // §21.28b：LOW 档要「真·原生 640x480 就近」——不带 60fps 优先。
                 //   否则 640x480 只有 30fps 的机型会被筛掉，lowCap 被拉到大分辨率
@@ -512,9 +521,12 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
                 fpsPriority = (profile != LadderProfile.LOW)
             )
         }
-        // 🔥 该分辨率实际可用采集帧率：min(60, 分辨率支持fps, 整机maxFps)
-        fun fpsFor(size: Size): Int =
-            minOf(desiredFps, sizeMaxFps[size] ?: maxFps, maxFps).coerceAtLeast(1)
+        // 🔥 该分辨率实际可用采集帧率：min(目标fps, 分辨率支持fps, 整机maxFps)
+        // ⭐ §77：目标 fps 优先用该档后端配置值（cfg.fps>0），否则用全局 desiredFps
+        fun fpsFor(size: Size, profile: LadderProfile? = null): Int {
+            val want = profile?.let { LadderConfigStore.entryOf(it).fps }?.takeIf { it > 0 } ?: desiredFps
+            return minOf(want, sizeMaxFps[size] ?: maxFps, maxFps).coerceAtLeast(1)
+        }
         
         val p4kCap = nearest(LadderProfile.P4K)
         val highCap = nearest(LadderProfile.HIGH)
@@ -522,22 +534,30 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         val ultraCap = nearest(LadderProfile.ULTRA)
         val lowCap = nearest(LadderProfile.LOW)
 
+        // ⭐ §77 各档码率：后端下发优先，未配置时用 LadderConfigStore 内置默认
+        //   （2026-08-18 内置默认各档 max 统一 +1500，min 保持 60%）
+        val cfgP4k = LadderConfigStore.entryOf(LadderProfile.P4K)
+        val cfgHigh = LadderConfigStore.entryOf(LadderProfile.HIGH)
+        val cfgUltra = LadderConfigStore.entryOf(LadderProfile.ULTRA)
+        val cfgStd = LadderConfigStore.entryOf(LadderProfile.STANDARD)
+        val cfgLow = LadderConfigStore.entryOf(LadderProfile.LOW)
+
         // §21.28 超低网(low)第5档：目标输出 640x480。多数机型原生 640x480 采集只有 30fps ——
         //   若原生就近分辨率的帧率不低于 STANDARD 档（即原生就是最优解）则直接采集不缩放；
         //   否则采集用 STANDARD 的分辨率（60fps 优先选出来的），编码前 scaleResolutionDownBy
         //   缩到 640x480（scaleDown 链路 SRS/P2P 两路本就打通：setEncodingParameters + p2pScaleDown）。
-        val lowNativeFps = fpsFor(lowCap)
-        val stdFps = fpsFor(stdCap)
+        val lowNativeFps = fpsFor(lowCap, LadderProfile.LOW)
+        val stdFps = fpsFor(stdCap, LadderProfile.STANDARD)
         val lowPreset = if (lowNativeFps >= stdFps) {
             LadderPreset(
                 width = lowCap.width, height = lowCap.height,
-                fps = lowNativeFps, maxKbps = 1500, minKbps = 900,
+                fps = lowNativeFps, maxKbps = cfgLow.maxKbps, minKbps = cfgLow.minKbps,
                 maxPushFps = 60, scaleDown = 1.0, is16x9 = false
             )
         } else {
             LadderPreset(
                 width = stdCap.width, height = stdCap.height,
-                fps = stdFps, maxKbps = 1500, minKbps = 900,
+                fps = stdFps, maxKbps = cfgLow.maxKbps, minKbps = cfgLow.minKbps,
                 maxPushFps = 60,
                 scaleDown = maxOf(1.0, stdCap.height.toDouble() / 480.0),
                 is16x9 = false
@@ -551,25 +571,26 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         // 🔥 5档预设：width/height=就近采集分辨率，fps=该分辨率实际可用帧率(60优先)，scaleDown=1.0（直接采集不缩放；low 档除外）
         currentLadder = mapOf(
             LadderProfile.LOW to lowPreset,
-            // ⭐ 2026-07-10 用户要求下调各档 max（min 按原 60% 比例同步调整）
+            // ⭐ §77：码率取自 LadderConfigStore（后端下发 > 内置默认）。
+            //   内置默认 2026-08-18 各档 max +1500：P4K 5500 / HIGH·ULTRA 5000 / STANDARD 4500 / LOW 3000
             LadderProfile.P4K to LadderPreset(
                 width = p4kCap.width, height = p4kCap.height,
-                fps = fpsFor(p4kCap), maxKbps = 4000, minKbps = 2400,
+                fps = fpsFor(p4kCap, LadderProfile.P4K), maxKbps = cfgP4k.maxKbps, minKbps = cfgP4k.minKbps,
                 maxPushFps = 60, scaleDown = 1.0, is16x9 = false
             ),
             LadderProfile.HIGH to LadderPreset(
                 width = highCap.width, height = highCap.height,
-                fps = fpsFor(highCap), maxKbps = 3500, minKbps = 2100,
+                fps = fpsFor(highCap, LadderProfile.HIGH), maxKbps = cfgHigh.maxKbps, minKbps = cfgHigh.minKbps,
                 maxPushFps = 60, scaleDown = 1.0, is16x9 = false
             ),
             LadderProfile.STANDARD to LadderPreset(
                 width = stdCap.width, height = stdCap.height,
-                fps = fpsFor(stdCap), maxKbps = 3000, minKbps = 1800,
+                fps = stdFps, maxKbps = cfgStd.maxKbps, minKbps = cfgStd.minKbps,
                 maxPushFps = 60, scaleDown = 1.0, is16x9 = false
             ),
             LadderProfile.ULTRA to LadderPreset(
                 width = ultraCap.width, height = ultraCap.height,
-                fps = fpsFor(ultraCap), maxKbps = 3500, minKbps = 2100,
+                fps = fpsFor(ultraCap, LadderProfile.ULTRA), maxKbps = cfgUltra.maxKbps, minKbps = cfgUltra.minKbps,
                 maxPushFps = 60, scaleDown = 1.0, is16x9 = true
             )
         )
@@ -1421,6 +1442,8 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
     
     fun setContext(context: android.content.Context) {
         appContext = context.applicationContext
+        // ⭐ §77：把上次登录落盘的档位配置读回内存，保证冷启动（永久token自动登录）也能生效
+        LadderConfigStore.load(appContext!!)
     }
     
     // MARK: - 编码参数

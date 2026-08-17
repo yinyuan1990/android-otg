@@ -888,7 +888,11 @@ data class LoginResponse(
     //   防 /24 网段号撞车（两地都是 192.168.1.x）误判同 WiFi。老后端缺省 → 跳过该校验。
     val clientIp: String? = null,
     // ⭐ 需求#13（2026-07-31）：三端最新版本号（总后台可配）。与本地版本比对，不一致提示更新（软提示）。
-    val latestVersions: LatestVersions? = null
+    val latestVersions: LatestVersions? = null,
+    // ⭐ §77 自带摄像头 5 档「分辨率/帧率/码率」配置（后端运营配置下发，覆盖本地默认值）。
+    //   用 JsonElement 原样接住再 toString() 交给 LadderConfigStore 解析，
+    //   免得为了几个数字在这里堆五层嵌套 data class。字段缺省(老后端)=null=用内置默认。
+    val videoLadder: com.google.gson.JsonElement? = null
 )
 
 // ⭐ 需求#13：三端最新版本号

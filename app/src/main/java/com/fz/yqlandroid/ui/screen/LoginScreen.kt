@@ -467,7 +467,13 @@ fun LoginScreen(
                                         }
                                         apply()
                                     }
-                                    
+
+                                    // ⭐ §77 视频码率档位配置（后端「运营配置→App配置」下发）：
+                                    //   单独落盘 + 立即生效，下次 calculateLadder 就用新值。
+                                    //   后端没配=下发 null → 清掉本地覆盖回内置默认（便于后台改回默认）。
+                                    com.fz.yqlandroid.manager.LadderConfigStore.saveFromLogin(
+                                        context, response.videoLadder?.toString())
+
                                     // 🔥 Step 3: 更新ViewModel
                                     appViewModel.loginSuccess(
                                         token = response.token,
