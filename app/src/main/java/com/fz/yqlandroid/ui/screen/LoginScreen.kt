@@ -62,6 +62,8 @@ fun LoginScreen(
     var rememberPassword by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    // ⭐ §68 登录失败弹框（服务端失败原因；设备不匹配时后端已拼上"当前设备对应的账号"）
+    var errorDialog by remember { mutableStateOf<String?>(null) }
     // ⭐ §53.4-定稿：线路（多人/单人）与编码（H264/H265）已不在登录页选——
     //   线路由 SessionPolicy 在推流前按"与观看端是否同 WiFi"决定，编码取总后台默认值。
     //   登录页只保留下面的摄像头模式。
@@ -500,12 +502,13 @@ fun LoginScreen(
                                 },
                                 onFailure = { error ->
                                     isLoading = false
-                                    errorMessage = error.message ?: "登录失败"
+                                    // §68 服务端失败原因改弹框（设备不匹配时含本机对应账号）
+                                    errorDialog = error.message ?: "登录失败"
                                 }
                             )
                         } catch (e: Exception) {
                             isLoading = false
-                            errorMessage = e.message ?: "网络错误"
+                            errorDialog = e.message ?: "网络错误"
                         }
                     }
                 },
@@ -594,6 +597,21 @@ fun LoginScreen(
             dismissButton = {
                 TextButton(onClick = { showDeviceIdDialog = false }) {
                     Text("关闭")
+                }
+            }
+        )
+    }
+
+    // ⭐ §68 登录失败弹框：展示后端返回的失败原因；账号与设备不匹配时，
+    //   后端已把「当前设备对应的账号」拼进 error 文案，这里原样弹出即可
+    errorDialog?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { errorDialog = null },
+            title = { Text("登录失败") },
+            text = { Text(msg, fontSize = 14.sp, color = Color(0xFF333333)) },
+            confirmButton = {
+                TextButton(onClick = { errorDialog = null }) {
+                    Text("知道了", color = Color(0xFF65AEF7), fontWeight = FontWeight.Medium)
                 }
             }
         )
