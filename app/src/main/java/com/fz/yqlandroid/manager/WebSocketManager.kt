@@ -121,6 +121,8 @@ class WebSocketManager private constructor() {
     // ⭐ WebSocket 重连成功（P2P 会话需要 ICE Restart）
     var onReconnected: (() -> Unit)? = null
     private var hadConnectedOnce = false
+    // ⭐ §71 本机安装实例ID（连接时从 DeviceIDManager 取）
+    private var installId: String? = null
     
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -142,7 +144,10 @@ class WebSocketManager private constructor() {
         this.jwtToken = token
         if (context != null) this.appContext = context.applicationContext
         
-        val url = "${APIConfig.BASE_STOMP_WS_URL}?token=$token&deviceId=$deviceId"
+        // ⭐ §71 安装实例ID：连接带上，后端单活校验（克隆机=非活跃安装 → 握手被拒/被硬踢 4001）
+        installId = appContext?.let { DeviceIDManager.getInstallId(it) } ?: installId
+        val url = "${APIConfig.BASE_STOMP_WS_URL}?token=$token&deviceId=$deviceId" +
+                (if (!installId.isNullOrEmpty()) "&installId=$installId" else "")
         println("wb [WS] 🔄 连接URL=$url")
         println("wb [WS] deviceId=$deviceId, token=${token.take(20)}...")
         
@@ -178,6 +183,13 @@ class WebSocketManager private constructor() {
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 println("wb [WS] 🔌 已关闭: code=$code, reason=$reason, 手动=$isManualDisconnect")
                 updateState(false)
+                // ⭐ §71 后端传输层硬踢（4001=kicked-by-new-install）：不重连，走被踢下线流程
+                if (code == 4001) {
+                    isManualDisconnect = true
+                    onSpecialMessage?.invoke("KICKED", mapOf<String, Any>(
+                        "message" to "该账号已在另一台手机上登录，本机已被下线"))
+                    return
+                }
                 if (!isManualDisconnect) {
                     scheduleReconnect()  // 🔥 只有非手动断开才重连
                 }
@@ -398,6 +410,20 @@ class WebSocketManager private constructor() {
                 // 🔥 试用断开（保存试用信息到SharedPreferences，与iOS一致）
                 "TryDisconnect" -> {
                     handleTryDisconnect(json)
+                }
+
+                // ⭐ §71 单活互踢：另一台手机（不同 installId）用同 deviceId 登录，后端广播 KICKED。
+                //   keepInstallId=胜出方（新登录那台）；本机匹配则忽略，不匹配则停推+退回登录页。
+                "KICKED" -> {
+                    if (messageDeviceId == deviceId) {
+                        val keep = json["keepInstallId"] as? String ?: ""
+                        if (keep.isNotEmpty() && keep == installId) {
+                            Log.d(TAG, "🥾 KICKED: 本机是新登录方，忽略")
+                        } else {
+                            Log.d(TAG, "🥾 KICKED: 本机被顶下线 (keep=${keep.take(8)}, mine=${installId?.take(8)})")
+                            onSpecialMessage?.invoke("KICKED", json)
+                        }
+                    }
                 }
                 
                 "CONFIG_STATE" -> {

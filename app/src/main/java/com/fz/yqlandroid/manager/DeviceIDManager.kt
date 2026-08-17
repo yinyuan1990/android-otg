@@ -109,6 +109,27 @@ object DeviceIDManager {
     fun getRawAndroidID(context: Context): String {
         return getAndroidID(context)
     }
+
+    // ⭐ §71 安装实例ID：首启随机 UUID，存 SharedPreferences。
+    //   deviceId（ANDROID_ID 衍生）可被 root/框架克隆成一样，但两台手机的 installId 必然不同——
+    //   登录/WS 连接都带上它，后端按 deviceId 单活：新登录抢占、克隆机被踢。
+    //   卸载重装会变：新安装登录即认领活跃位，属预期（等同换机）。
+    @Volatile
+    private var cachedInstallId: String? = null
+
+    @Synchronized
+    fun getInstallId(context: Context): String {
+        cachedInstallId?.let { return it }
+        val prefs = context.getSharedPreferences("install_prefs", Context.MODE_PRIVATE)
+        var id = prefs.getString("install_id", null)
+        if (id.isNullOrBlank()) {
+            id = java.util.UUID.randomUUID().toString().replace("-", "").uppercase()
+            prefs.edit().putString("install_id", id).apply()
+            Log.d(TAG, "🆕 生成安装实例ID: ${id.take(8)}...")
+        }
+        cachedInstallId = id
+        return id
+    }
     
     /**
      * 清除缓存（仅清除内存缓存，设备ID本身不会变）

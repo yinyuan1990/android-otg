@@ -361,7 +361,8 @@ fun LoginScreen(
                                     username = username,
                                     password = password,
                                     deviceId = deviceId,
-                                    userType = "device"
+                                    userType = "device",
+                                    installId = DeviceIDManager.getInstallId(context)
                                 )
                             )
                             

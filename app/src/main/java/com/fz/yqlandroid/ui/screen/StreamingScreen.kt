@@ -112,6 +112,9 @@ fun StreamingScreen(
     //   以前 Android 收到 TryDisconnect 只默默停推流，用户完全不知道为什么画面没了。
     var showTrialEndDialog by remember { mutableStateOf(false) }
     var trialEndMessage by remember { mutableStateOf("") }
+    // ⭐ §71 单活互踢：同 deviceId 在另一台手机登录（不同安装实例）→ 本机被顶下线弹框
+    var showKickedDialog by remember { mutableStateOf(false) }
+    var kickedMessage by remember { mutableStateOf("") }
     // ⭐ 需求#13（2026-07-31）：版本更新软提示（登录响应最新版本 ≠ 本地 versionName → 推流页进入时弹一次）
     var showUpdatePrompt by remember { mutableStateOf(false) }
     var updatePromptText by remember { mutableStateOf("") }
@@ -252,6 +255,18 @@ fun StreamingScreen(
                         }
                         WebSocketManager.instance.disconnect()
                     }
+                }
+                // ⭐ §71 被顶下线（另一台手机用同 deviceId 登录）：停推 + 弹框 + 断WS（防重连拉起）
+                "KICKED" -> {
+                    webRTCManager.autoRecoverEnabled = false
+                    webRTCManager.stopPublish()
+                    keepAliveManager.stop()
+                    isStreaming = false
+                    if (!showKickedDialog) {
+                        kickedMessage = (messageDict["message"] as? String).orEmpty()
+                        showKickedDialog = true
+                    }
+                    WebSocketManager.instance.disconnect()
                 }
             }
         }
@@ -959,6 +974,22 @@ fun StreamingScreen(
                 confirmButton = {
                     TextButton(onClick = {
                         showTrialEndDialog = false
+                        keepAliveManager.stop()
+                        onLogout()
+                    }) { Text("回到登录页") }
+                }
+            )
+        }
+
+        // ⭐ §71 被顶下线弹框（同试用到期：不可点外关闭，确认 → 清理并回登录页）
+        if (showKickedDialog) {
+            AlertDialog(
+                onDismissRequest = { /* 强制用户看到并确认 */ },
+                title = { Text("已在其他设备登录") },
+                text = { Text(kickedMessage.ifEmpty { "该账号已在另一台手机上登录，本机已被下线" }) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showKickedDialog = false
                         keepAliveManager.stop()
                         onLogout()
                     }) { Text("回到登录页") }

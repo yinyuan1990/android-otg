@@ -804,7 +804,9 @@ data class LoginRequest(
     val username: String,
     val password: String,
     val deviceId: String,
-    val userType: String = "device"
+    val userType: String = "device",
+    // ⭐ §71 安装实例ID（首启随机 UUID）：后端按 deviceId 记录活跃安装，克隆机单活互踢
+    val installId: String = ""
 )
 
 /**
