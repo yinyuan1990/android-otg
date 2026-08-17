@@ -38,7 +38,7 @@ object NetworkService {
             // 🔐 与iOS完全一致：AES加密 "username,password" → Base64，请求体 {data, deviceId}
             val encrypted = AESUtils.encryptLoginData(request.username, request.password)
                 ?: return@withContext Result.failure(Exception("加密失败"))
-            val bodyMap = mapOf(
+            val bodyMap = mutableMapOf(
                 "data" to encrypted,
                 "deviceId" to request.deviceId,
                 // §56.9 上报机型（总后台用户管理「查看机型」用；后端登录成功后存到用户）
@@ -48,6 +48,14 @@ object NetworkService {
                 //   主版 yql-android 不带此字段，行为不变。老后端未部署 §57.4 时忽略该字段，照常放行。
                 "clientVariant" to "otg"
             )
+            // ⭐ §71/§72/§75/§76 反克隆字段：本接口用扁平 Map 发请求，**必须在这里显式带上**——
+            //   只在 LoginRequest 里加字段是发不出去的（登录体不是直接序列化 LoginRequest）。
+            if (request.installId.isNotEmpty()) bodyMap["installId"] = request.installId
+            if (request.hwPub.isNotEmpty()) bodyMap["hwPub"] = request.hwPub
+            if (request.hwSign.isNotEmpty()) bodyMap["hwSign"] = request.hwSign
+            if (request.hwTs.isNotEmpty()) bodyMap["hwTs"] = request.hwTs
+            if (request.hwLevel.isNotEmpty()) bodyMap["hwLevel"] = request.hwLevel
+            if (request.hwChal.isNotEmpty()) bodyMap["hwChal"] = request.hwChal
             val json = gson.toJson(bodyMap)
             
             println("jfh [Login] 接口: ${APIConfig.Auth.LOGIN}")
@@ -89,6 +97,33 @@ object NetworkService {
         }
     }
     
+    /**
+     * ⭐ §76 领取一次性安全挑战值（登录前调用，无需 token）。
+     * GET /api/auth/hw-challenge?deviceId=xxx → {challenge, expiresIn}
+     * 失败返回 null：调用方退回不带挑战值的旧签名格式（灰度期后端放行），不阻断登录。
+     */
+    suspend fun getHwChallenge(deviceId: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val url = APIConfig.fullURL(APIConfig.Auth.HW_CHALLENGE) + "?deviceId=$deviceId"
+            val httpRequest = Request.Builder().url(url).get()
+                .header("User-Agent", "iPhone/iOS")
+                .build()
+            val response = client.newCall(httpRequest).execute()
+            val body = response.body?.string()
+            if (response.isSuccessful && body != null) {
+                val obj = gson.fromJson(body, com.google.gson.JsonObject::class.java)
+                val chal = obj?.get("challenge")?.asString
+                if (!chal.isNullOrEmpty()) chal else null
+            } else {
+                println("jfh [HwChallenge] 领取失败 HTTP${response.code}")
+                null
+            }
+        } catch (e: Exception) {
+            println("jfh [HwChallenge] 异常: ${e.message}")
+            null
+        }
+    }
+
     // ========== 注册 ==========
     
     suspend fun registerDevice(request: RegisterRequest): Result<RegisterResponse> = withContext(Dispatchers.IO) {
@@ -813,7 +848,9 @@ data class LoginRequest(
     val hwSign: String = "",
     val hwTs: String = "",
     // ⭐ §75 私钥实际存放位置（tee/strongbox/software）：总后台「芯片密钥」列展示，用于发现静默降级
-    val hwLevel: String = ""
+    val hwLevel: String = "",
+    // ⭐ §76 登录前领的一次性挑战值（已拼进签名 payload），服务端验签后即焚，防抓包重放
+    val hwChal: String = ""
 )
 
 /**

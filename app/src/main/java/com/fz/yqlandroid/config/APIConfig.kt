@@ -28,6 +28,7 @@ object APIConfig {
         const val REGISTER_DEVICE = "/auth/register/device"      // 设备端注册（与iOS一致）
         const val LOGIN = "/auth/login/device"                   // 一机一码登录（与iOS一致）
         const val CHECK_DEVICE = "/auth/check-device"            // 注册前检查设备是否已注册
+        const val HW_CHALLENGE = "/auth/hw-challenge"            // §76 硬件密钥一次性挑战值（登录前领，防重放）
         const val VERIFY_TOKEN = "/auth/verify-token"            // 验证Token
         const val REFRESH_TOKEN = "/auth/refresh-token"          // 刷新Token
         const val STREAM_TOKEN = "/auth/stream/token/simple"     // 获取推流Token

@@ -356,10 +356,15 @@ fun LoginScreen(
                     
                     scope.launch {
                         try {
-                            // ⭐ §72 硬件密钥签名：payload=deviceId|installId|时间戳（三者与后端约定一致）
+                            // ⭐ §72/§76 硬件密钥签名：先领一次性挑战值，payload=deviceId|installId|时间戳|挑战值
+                            //   （挑战值验签后被服务端焚毁，抓包重放无效）。领取失败则退回不带挑战值的旧格式，
+                            //   由后端开关决定放不放行，不至于因为一次网络抖动就登不上。
                             val loginInstallId = DeviceIDManager.getInstallId(context)
+                            val hwChal = NetworkService.getHwChallenge(deviceId)
                             val hwTs = System.currentTimeMillis().toString()
-                            val hwSign = com.fz.yqlandroid.manager.HwKeyManager.sign("$deviceId|$loginInstallId|$hwTs")
+                            val hwPayload = "$deviceId|$loginInstallId|$hwTs" +
+                                    if (!hwChal.isNullOrEmpty()) "|$hwChal" else ""
+                            val hwSign = com.fz.yqlandroid.manager.HwKeyManager.sign(hwPayload)
                             val result = NetworkService.login(
                                 LoginRequest(
                                     username = username,
@@ -370,7 +375,8 @@ fun LoginScreen(
                                     hwPub = com.fz.yqlandroid.manager.HwKeyManager.getPublicKeyB64() ?: "",
                                     hwSign = hwSign ?: "",
                                     hwTs = if (hwSign != null) hwTs else "",
-                                    hwLevel = com.fz.yqlandroid.manager.HwKeyManager.securityLevel() ?: ""
+                                    hwLevel = com.fz.yqlandroid.manager.HwKeyManager.securityLevel() ?: "",
+                                    hwChal = if (hwSign != null) (hwChal ?: "") else ""
                                 )
                             )
                             
