@@ -180,6 +180,8 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
     //    AE被钉[30,30]、capFps=30，左上角采集≈推送）。
     private var thermalFpsCap: Int = Int.MAX_VALUE
     private var thermalBitrateScale: Double = 1.0
+    /** §70 进热控前的码率快照（OTG 用）：>0=处于热控中，NOMINAL 恢复后清 -1 */
+    private var thermalPreKbps: Int = -1
     
     // MARK: - 初始化
     
@@ -250,10 +252,22 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         // ⭐ 推送基准 = min(档位采集fps, 档位推流上限, 后端目标 targetOutputFps)：
         //    此前直接用 preset.fps(采集60) → 热状态一变化(含回落NOMINAL)推送被拉回60，
         //    后端 set_fps=15 的目标被顶掉，「采集60·推15」解耦失效
-        //    OTG：档位/ladder 不适用，基准 = min(编码器该尺寸真实上限, 后端目标)
-        val basePushFps = if (usingOtgCamera) minOf(otgEncoderFpsCap(), targetOutputFps)
+        // ⭐⭐ §70 otg.log 复盘（2026-08-17）：OTG 的 fps 必须**彻底**豁免热控——
+        //    原 min(otgEncoderFpsCap, targetOutputFps) 里 targetOutputFps 是【自带摄像头】的
+        //    持久推送目标（常=25），OTG 推流 fps 走 otg_ 独立通道直设编码器、根本不更新它；
+        //    结果热控一触发（含回落 NOMINAL 的重算）推送被钉死 25 且永不恢复
+        //    ——客服反馈「240fps 挡只能坚持 10 分钟」即此：发热到 FAIR 掉 25，凉了也回不去。
+        //    OTG 基准=currentFps（保持 otg_ 通道下发的现值不动），只留码率缩放兜底。
+        val basePushFps = if (usingOtgCamera) currentFps
                           else minOf(preset?.fps ?: currentFps, preset?.maxPushFps ?: 60, targetOutputFps)
-        val baseMaxKbps = preset?.maxKbps ?: currentBitrateKbps
+        // §70 码率基准：OTG 无档位表，原直接拿 currentBitrateKbps 当基准 → FAIR ×0.8 后
+        // 下一轮又在 0.8 的结果上再乘（单向棘轮，只降不升）。改为进热控时快照、回 NOMINAL 用快照恢复。
+        val baseMaxKbps = preset?.maxKbps ?: run {
+            if (thermalPreKbps <= 0) thermalPreKbps = currentBitrateKbps
+            val base = thermalPreKbps
+            if (level == ThermalManager.Level.NOMINAL) thermalPreKbps = -1
+            base
+        }
 
         // ⭐ 热控只降「推送」fps + 码率，采集帧率不动（对齐 iOS：iOS 无热控、相机恒按档位采集；
         //    编码/发送才是主要热源，降推送已能有效控温）
