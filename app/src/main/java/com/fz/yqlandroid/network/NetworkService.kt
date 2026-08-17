@@ -811,7 +811,9 @@ data class LoginRequest(
     //   hwPub=公钥(SPKI DER Base64)，hwSign=对 "deviceId|installId|hwTs" 的签名，hwTs=毫秒时间戳
     val hwPub: String = "",
     val hwSign: String = "",
-    val hwTs: String = ""
+    val hwTs: String = "",
+    // ⭐ §75 私钥实际存放位置（tee/strongbox/software）：总后台「芯片密钥」列展示，用于发现静默降级
+    val hwLevel: String = ""
 )
 
 /**

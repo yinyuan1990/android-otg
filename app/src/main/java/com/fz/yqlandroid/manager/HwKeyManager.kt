@@ -1,9 +1,12 @@
 package com.fz.yqlandroid.manager
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Signature
@@ -63,5 +66,32 @@ object HwKeyManager {
         }
     } catch (e: Exception) {
         Log.e(TAG, "签名失败", e); null
+    }
+
+    /**
+     * ⭐ §75 私钥到底有没有落在硬件安全区（总后台「芯片密钥」列展示用）。
+     * AndroidKeyStore 在没有 TEE 的机器上会**静默降级**成软件密钥——不查就分不出来，
+     * 后台只看到「注册了公钥」，会误以为防克隆已生效。
+     * @return strongbox / tee / software，查不到返回 null（老系统异常，不上报）
+     */
+    fun securityLevel(): String? = try {
+        ensureEntry()?.privateKey?.let { pk ->
+            val info = KeyFactory.getInstance(pk.algorithm, "AndroidKeyStore")
+                .getKeySpec(pk, KeyInfo::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                when (info.securityLevel) {
+                    KeyProperties.SECURITY_LEVEL_STRONGBOX -> "strongbox"
+                    KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "tee"
+                    KeyProperties.SECURITY_LEVEL_SOFTWARE -> "software"
+                    // SECURITY_LEVEL_UNKNOWN_SECURE：确定在安全硬件里但分不清哪一级
+                    else -> if (info.securityLevel == KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE) "tee" else null
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                if (info.isInsideSecureHardware) "tee" else "software"
+            }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "读取密钥安全等级失败", e); null
     }
 }

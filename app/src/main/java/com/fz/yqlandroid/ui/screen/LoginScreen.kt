@@ -369,7 +369,8 @@ fun LoginScreen(
                                     installId = loginInstallId,
                                     hwPub = com.fz.yqlandroid.manager.HwKeyManager.getPublicKeyB64() ?: "",
                                     hwSign = hwSign ?: "",
-                                    hwTs = if (hwSign != null) hwTs else ""
+                                    hwTs = if (hwSign != null) hwTs else "",
+                                    hwLevel = com.fz.yqlandroid.manager.HwKeyManager.securityLevel() ?: ""
                                 )
                             )
                             
