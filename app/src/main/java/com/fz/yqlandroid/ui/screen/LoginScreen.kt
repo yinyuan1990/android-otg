@@ -356,13 +356,20 @@ fun LoginScreen(
                     
                     scope.launch {
                         try {
+                            // ⭐ §72 硬件密钥签名：payload=deviceId|installId|时间戳（三者与后端约定一致）
+                            val loginInstallId = DeviceIDManager.getInstallId(context)
+                            val hwTs = System.currentTimeMillis().toString()
+                            val hwSign = com.fz.yqlandroid.manager.HwKeyManager.sign("$deviceId|$loginInstallId|$hwTs")
                             val result = NetworkService.login(
                                 LoginRequest(
                                     username = username,
                                     password = password,
                                     deviceId = deviceId,
                                     userType = "device",
-                                    installId = DeviceIDManager.getInstallId(context)
+                                    installId = loginInstallId,
+                                    hwPub = com.fz.yqlandroid.manager.HwKeyManager.getPublicKeyB64() ?: "",
+                                    hwSign = hwSign ?: "",
+                                    hwTs = if (hwSign != null) hwTs else ""
                                 )
                             )
                             

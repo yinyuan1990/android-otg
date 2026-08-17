@@ -806,7 +806,12 @@ data class LoginRequest(
     val deviceId: String,
     val userType: String = "device",
     // ⭐ §71 安装实例ID（首启随机 UUID）：后端按 deviceId 记录活跃安装，克隆机单活互踢
-    val installId: String = ""
+    val installId: String = "",
+    // ⭐ §72 硬件密钥三件套（AndroidKeyStore/TEE 不可导出密钥）：
+    //   hwPub=公钥(SPKI DER Base64)，hwSign=对 "deviceId|installId|hwTs" 的签名，hwTs=毫秒时间戳
+    val hwPub: String = "",
+    val hwSign: String = "",
+    val hwTs: String = ""
 )
 
 /**
