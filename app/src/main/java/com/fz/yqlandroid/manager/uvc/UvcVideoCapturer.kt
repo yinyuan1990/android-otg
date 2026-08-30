@@ -553,6 +553,34 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         //   时 YUYV 不算"回退"，照常放行。PC 面板显式选 YUYV（preferredFormat=2）不受影响。
         val deviceHasMjpeg = descriptorFps.keys.any { it.startsWith("${UvcDescriptorFps.FORMAT_MJPEG}@") }
         if (st.format == UVCCamera.FRAME_FORMAT_YUYV && preferredFormat != 2 && deviceHasMjpeg) {
+            // ⭐ §56.17b（DH CAM1 实锤）：回退 YUYV / 弹框**之前**先在 MJPEG 内部降分辨率。
+            //   有些摄像头的大分辨率 MJPEG 只声明了不可达高帧率（1280x1024 仅 [180]，且
+            //   bmHint=(1<<0) 强制 libuvc 用该精确间隔，无法改请求成 30），180fps × 大帧 超
+            //   USB2 isoc 带宽（本机 12.8MB/s）→ 一帧攒不完整 → 0帧；但小分辨率同样高帧率下
+            //   每帧小得多，塞得进带宽 → 能出画（640x480@350≈8.7MB/s / 1024x768@180≈11MB/s）。
+            //   在 MJPEG 里逐级降分辨率（绝不碰 YUYV，§56.17 主旨不变），全试完才走下面的弹框。
+            val smallerMjpeg = descriptorFps.keys
+                .filter { it.startsWith("${UvcDescriptorFps.FORMAT_MJPEG}@") }
+                .mapNotNull { parseDescSize(it) }
+                .distinct()
+                .filter { (w, h) ->
+                    w.toLong() * h < requestedWidth.toLong() * requestedHeight &&
+                    !triedDownSizes.contains(sizeKey(w, h)) &&
+                    EncoderSizeLimits.isEncodable(codecName(), w, h)
+                }
+                .maxByOrNull { (w, h) -> w.toLong() * h }
+            if (smallerMjpeg != null) {
+                triedDownSizes.add(sizeKey(requestedWidth, requestedHeight))
+                Log.d("meidui", "🔌 [OTG] ⬇️ §56.17b MJPEG ${requestedWidth}x${requestedHeight} 0帧(大分辨率超带宽)" +
+                        " → MJPEG 内降分辨率重试 ${smallerMjpeg.first}x${smallerMjpeg.second}（不回退YUYV）")
+                com.fz.yqlandroid.manager.OtgLogReporter.diag(
+                    "⬇️ §56.17b MJPEG ${requestedWidth}x${requestedHeight} 0帧(大分辨率超USB2带宽) → MJPEG内降分辨率 ${smallerMjpeg.first}x${smallerMjpeg.second}")
+                requestedWidth = smallerMjpeg.first
+                requestedHeight = smallerMjpeg.second
+                noFrameRetry = 0   // 新尺寸从最优 MJPEG 策略重开
+                startStreamLocked(camera)
+                return
+            }
             val sizeK = sizeKey(requestedWidth, requestedHeight)
             // 请求尺寸与实际协商尺寸可能不同（就近选档），精确 key 查不到时列出全部 MJPEG 档的谈判结果
             val why = probeVerdicts["MJPEG@$sizeK"]
