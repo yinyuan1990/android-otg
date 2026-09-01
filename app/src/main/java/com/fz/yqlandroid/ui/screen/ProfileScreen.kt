@@ -116,7 +116,8 @@ fun ProfileScreen(
             .onSuccess { pcdlConfig = it }
     }
 
-    // ⭐ §95：每次进入/回到「我的」页都拉活动状态；活动开启则立刻弹层（不在推流页弹）
+    // ⭐ §95/§95.2：每次进入/回到「我的」页都拉活动状态（「时长奖励」入口显隐要用）；
+    //   自动弹层仅限【会员】——非会员的活动弹层留在推流页登录后弹（§95.2），进「我的」页不弹。
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, jwtToken) {
         val observer = LifecycleEventObserver { _, event ->
@@ -126,7 +127,7 @@ fun ProfileScreen(
                 com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
                     .onSuccess {
                         referralInfo = it
-                        if (it.enabled && !it.state.isNullOrBlank()) showReferralDialog = true
+                        if (it.enabled && it.state == "MEMBER") showReferralDialog = true
                     }
             }
         }
@@ -650,14 +651,14 @@ fun ProfileScreen(
 }
 
 /**
- * ⭐ §95（2026-09-01）：邀请/时长奖励活动弹层 —— 从推流页（§60）整体搬到「我的」页。
+ * ⭐ §95（2026-09-01）：邀请/时长奖励活动弹层（会员在「我的」页自动弹；§95.2 非会员在推流页登录后弹，两处复用本组件）。
  * 绑定/领取逻辑与 §60/§62/§64.2 完全一致（接口不动），仅展示调整：
  * ① 头部固定文案改两行红字（原三句话删除，后台 popupContent 不再展示）；
  * ② 档位行「邀请解锁成功」→「推荐解锁成功」（"推荐"红色）；
  * ③ 「奖励时长」→「奖励账号时长」并缩小字号（14/13→10，不然放不下）。
  */
 @Composable
-private fun ReferralActivityDialog(
+internal fun ReferralActivityDialog(
     status: com.fz.yqlandroid.network.ReferralStatus,
     onDismiss: () -> Unit,
     onStatusChanged: (com.fz.yqlandroid.network.ReferralStatus) -> Unit

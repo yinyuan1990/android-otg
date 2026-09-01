@@ -126,7 +126,10 @@ fun StreamingScreen(
     var loginAdTitle by remember { mutableStateOf("公告") }
     var loginAdVersion by remember { mutableStateOf(0L) }
 
-    // ⭐ §95（2026-09-01）：§60 邀请活动弹层从推流页搬到「我的」页（ProfileScreen），本页相关状态/弹层全部移除。
+    // ⭐ §95.2（2026-09-01）：活动弹层按身份分流——非会员（试用）仍在本页登录后自动弹（UI 复用
+    //   ProfileScreen 的 ReferralActivityDialog，新文案一致）；会员的自动弹已搬到「我的」页（§95）。
+    var showReferralDialog by remember { mutableStateOf(false) }
+    var referralStatus by remember { mutableStateOf<com.fz.yqlandroid.network.ReferralStatus?>(null) }
     // ⭐ 需求#3（2026-07-31）：小米后台推流引导（自启动+省电策略无 API，只能引导用户手动开）
     var showXiaomiGuide by remember { mutableStateOf(false) }
     var connectionStatus by remember { mutableStateOf("未连接") }
@@ -328,7 +331,22 @@ fun StreamingScreen(
         } catch (_: Exception) { /* 拉取失败不拦截使用 */ }
     }
 
-    // ⭐ §95（2026-09-01）：原 §60「登录后拉邀请活动状态并弹层」已搬到「我的」页（ProfileScreen 打开即弹），推流页不再触发。
+    // ⭐ §95.2：登录后拉邀请活动状态——仅【非会员】(TRIAL_CAN_BIND/TRIAL_BOUND) 在本页弹层；
+    //   会员不在此弹（会员的自动弹在「我的」页，见 ProfileScreen §95）。
+    LaunchedEffect(Unit) {
+        try {
+            val jwtToken = context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
+                .getString("jwt_token", "") ?: ""
+            if (jwtToken.isNotEmpty()) {
+                com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken).onSuccess { st ->
+                    if (st.enabled && st.state != null && st.state != "MEMBER") {
+                        referralStatus = st
+                        showReferralDialog = true
+                    }
+                }
+            }
+        } catch (_: Exception) { /* 拉取失败不拦截使用 */ }
+    }
 
     // ⭐ 需求#3：小米切后台断推流的权限处理（进推流页时做，一次性）：
     //   ① 不在电池优化白名单 → 弹系统授权框（所有品牌通用，MIUI 上等价于省电策略→无限制的关键一半）；
@@ -720,7 +738,15 @@ fun StreamingScreen(
             }
         }
 
-        // ⭐ §95（2026-09-01）：邀请/时长奖励活动弹层已整体搬到「我的」页（ProfileScreen：打开即弹 +「时长奖励」入口随时可看），推流页不再弹。
+        // ⭐ §95.2：非会员活动弹层（登录后自动弹；复用「我的」页的 ReferralActivityDialog，文案/绑定逻辑一致）。
+        //   会员的自动弹在「我的」页（§95），本页 getReferralStatus 已按身份过滤，MEMBER 不会走到这里。
+        if (showReferralDialog && referralStatus != null) {
+            ReferralActivityDialog(
+                status = referralStatus!!,
+                onDismiss = { showReferralDialog = false },
+                onStatusChanged = { referralStatus = it }
+            )
+        }
 
         // ⭐ 需求#1：试用到期弹框（不可点外关闭；确定 → 清理并回登录页，对齐 iOS「取消→登录页」路径）
         if (showTrialEndDialog) {
