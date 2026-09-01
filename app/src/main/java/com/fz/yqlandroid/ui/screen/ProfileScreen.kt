@@ -18,6 +18,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -27,6 +28,8 @@ import androidx.compose.ui.unit.sp
 import com.fz.yqlandroid.manager.DeviceIDManager
 import com.fz.yqlandroid.manager.WebSocketManager
 import com.fz.yqlandroid.navigation.AppViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.launch
 
 /**
@@ -107,18 +110,28 @@ fun ProfileScreen(
         }
     }
     
-    // ⭐ §60：加载邀请状态（剩余天数）+ PC 下载入口配置（失败均静默，不影响页面）
+    // ⭐ §60：PC 下载入口配置（失败静默，不影响页面）
     LaunchedEffect(Unit) {
-        if (jwtToken.isNotEmpty()) {
-            com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
-                .onSuccess {
-                    referralInfo = it
-                    // ⭐ §95：打开「我的」页即弹活动弹层（原推流页登录后弹，按需求搬到这里）
-                    if (it.enabled && it.state != null) showReferralDialog = true
-                }
-        }
         com.fz.yqlandroid.network.NetworkService.getPcDownload()
             .onSuccess { pcdlConfig = it }
+    }
+
+    // ⭐ §95：每次进入/回到「我的」页都拉活动状态；活动开启则立刻弹层（不在推流页弹）
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, jwtToken) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            if (jwtToken.isEmpty()) return@LifecycleEventObserver
+            scope.launch {
+                com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
+                    .onSuccess {
+                        referralInfo = it
+                        if (it.enabled && !it.state.isNullOrBlank()) showReferralDialog = true
+                    }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     
     // 🔥 等级显示（对标 iOS levelDisplayText：activated + activation_level）
