@@ -668,6 +668,7 @@ private fun ReferralActivityDialog(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var bindAlert by remember { mutableStateOf<String?>(null) }
     val isMember = status.state == "MEMBER"
     val jwt = remember {
         context.getSharedPreferences("token_prefs", Context.MODE_PRIVATE)
@@ -713,29 +714,36 @@ private fun ReferralActivityDialog(
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
-                    // ⭐ §95 文字口径：固定头部两行红字（原「邀请奖励(...)/新用户前8位/日卡一张」三句与后台 popupContent 均不再展示）
+                    // ⭐ §95：会员 / 非会员头部文案分开（逻辑不动）
                     Text(
-                        "在未开通账号的推荐人入口中\n输入自己的金凤凰账号即可完成奖励",
+                        if (isMember)
+                            "在未开通账号的推荐人入口中\n输入自己的金凤凰账号即可完成奖励"
+                        else
+                            "填写推荐人账号即可领取日卡一张",
                         fontSize = 16.sp, fontWeight = FontWeight.Bold,
                         color = Color(0xFFE6432D), lineHeight = 22.sp
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     when (status.state) {
                         "TRIAL_CAN_BIND" -> {
-                            Text("填写邀请人（手机端账号前8位 / 昵称 / 完整账号），邀请成功可领取日卡一张（全部功能体验 ${status.trialHours} 小时，可稍后到「我的」页使用）",
-                                fontSize = 14.sp, color = Color(0xFF1A1A1A), lineHeight = 20.sp)
-                            Spacer(modifier = Modifier.height(10.dp))
                             OutlinedTextField(
                                 value = inviterInput,
                                 onValueChange = { inviterInput = it; error = null },
-                                label = { Text("邀请人账号前8位 / 昵称 / 完整账号") },
+                                label = { Text("推荐人的金凤凰账号前8位或完整账号") },
+                                placeholder = { Text("推荐人的金凤凰账号前8位或完整账号") },
                                 singleLine = true,
                                 enabled = !busy,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(modifier = Modifier.height(8.dp))
-                            Text("⚠️ 邀请号终身只能选择一次，提交后不可更改",
-                                fontSize = 13.sp, color = Color(0xFFE6432D), fontWeight = FontWeight.Medium)
+                            Text(
+                                buildAnnotatedString {
+                                    append("⚠️ ")
+                                    withStyle(SpanStyle(fontSize = 15.sp, fontWeight = FontWeight.Bold)) { append("账号") }
+                                    append("终身只能选择一次，提交后不可更改")
+                                },
+                                fontSize = 13.sp, color = Color(0xFFE6432D), fontWeight = FontWeight.Medium
+                            )
                             if (error != null) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(error!!, fontSize = 13.sp, color = Color.Red)
@@ -744,20 +752,20 @@ private fun ReferralActivityDialog(
                             Button(
                                 onClick = {
                                     val input = inviterInput.trim()
-                                    if (input.isEmpty()) { error = "请输入邀请人的账号前8位、昵称或完整账号"; return@Button }
+                                    if (input.isEmpty()) { error = "请输入推荐人的金凤凰账号前8位或完整账号"; return@Button }
                                     busy = true
                                     error = null
                                     scope.launch {
                                         val devId = com.fz.yqlandroid.manager.DeviceIDManager.getDeviceID(context)
                                         com.fz.yqlandroid.network.NetworkService.referralBind(input, devId, jwt)
-                                            .onSuccess { r ->
+                                            .onSuccess {
                                                 busy = false
-                                                notice = r.message ?: "绑定成功！"
+                                                bindAlert = "领取成功可在我的页面使用"
                                                 refreshReferral()
                                             }
-                                            .onFailure { e ->
+                                            .onFailure {
                                                 busy = false
-                                                error = e.message ?: "绑定失败，请重试"
+                                                bindAlert = "请输入已开通的账号或正确的账号才可领取日卡奖励"
                                             }
                                     }
                                 },
@@ -872,6 +880,17 @@ private fun ReferralActivityDialog(
                 }
             }
         }
+    }
+
+    if (bindAlert != null) {
+        AlertDialog(
+            onDismissRequest = { bindAlert = null },
+            title = { Text("提示") },
+            text = { Text(bindAlert!!, fontSize = 15.sp) },
+            confirmButton = {
+                TextButton(onClick = { bindAlert = null }) { Text("确定") }
+            }
+        )
     }
 }
 
