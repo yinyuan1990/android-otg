@@ -9,11 +9,11 @@ object APIConfig {
     // MARK: - 服务器配置
     
     // 基础URL
-    const val BASE_URL = "https://api.147258yql.cn"
+    const val BASE_URL = "https://api.jinfenghuang.vip"
     
     // WebSocket URL
-    const val BASE_WS_URL = "wss://ws.147258yql.cn/native-ws"
-    const val BASE_STOMP_WS_URL = "wss://ws.147258yql.cn/ws"
+    const val BASE_WS_URL = "wss://ws.jinfenghuang.vip/native-ws"
+    const val BASE_STOMP_WS_URL = "wss://ws.jinfenghuang.vip/ws"
     
     // API版本
     private const val API_VERSION = "/api"

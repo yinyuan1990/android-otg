@@ -116,8 +116,8 @@ fun ProfileScreen(
             .onSuccess { pcdlConfig = it }
     }
 
-    // ⭐ §95/§95.2：每次进入/回到「我的」页都拉活动状态（「时长奖励」入口显隐要用）；
-    //   自动弹层仅限【会员】——非会员的活动弹层留在推流页登录后弹（§95.2），进「我的」页不弹。
+    // ⭐ §95/§98：每次进入/回到「我的」页都拉活动状态（「时长奖励」入口显隐要用）；
+    //   §98（2026-09-20）：自动弹层会员与非会员一律在本页弹（推流页 StreamingScreen 不再弹）。
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, jwtToken) {
         val observer = LifecycleEventObserver { _, event ->
@@ -127,7 +127,7 @@ fun ProfileScreen(
                 com.fz.yqlandroid.network.NetworkService.getReferralStatus(jwtToken)
                     .onSuccess {
                         referralInfo = it
-                        if (it.enabled && it.state == "MEMBER") showReferralDialog = true
+                        if (it.enabled && it.state != null) showReferralDialog = true
                     }
             }
         }
