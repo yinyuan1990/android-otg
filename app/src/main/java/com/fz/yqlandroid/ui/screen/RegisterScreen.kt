@@ -46,6 +46,9 @@ import kotlinx.coroutines.launch
  * - 密保问题（服务器默认）
  * - 密保答案（默认1、2、3）
  */
+/** §104 注册页登录密码 / 管理密码的默认预填值 */
+private const val DEFAULT_REGISTER_PASSWORD = "888888"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RegisterScreen(
@@ -57,8 +60,9 @@ fun RegisterScreen(
     
     // 用户输入
     var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var secondaryPassword by remember { mutableStateOf("") }
+    // §104 登录密码 / 管理密码默认预填 888888（与后台「重置密码」默认值一致），用户可改
+    var password by remember { mutableStateOf(DEFAULT_REGISTER_PASSWORD) }
+    var secondaryPassword by remember { mutableStateOf(DEFAULT_REGISTER_PASSWORD) }
     
     // 密码可见性
     var isPasswordVisible by remember { mutableStateOf(false) }
