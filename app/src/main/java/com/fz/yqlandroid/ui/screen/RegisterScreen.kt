@@ -65,7 +65,7 @@ fun RegisterScreen(
     var secondaryPassword by remember { mutableStateOf(DEFAULT_REGISTER_PASSWORD) }
     
     // 密码可见性
-    var isPasswordVisible by remember { mutableStateOf(false) }
+    var isPasswordVisible by remember { mutableStateOf(true) }  // §107 默认明文，登录密码/绑定密码共用
     
     // 状态
     var isLoading by remember { mutableStateOf(false) }
@@ -299,7 +299,7 @@ fun RegisterScreen(
                             ) 
                         },
                         modifier = Modifier.weight(1f),
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = Color.Transparent,
