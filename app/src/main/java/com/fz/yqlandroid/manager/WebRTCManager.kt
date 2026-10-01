@@ -248,88 +248,16 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
      * 档位越高约束越强；回落到 NOMINAL 时恢复档位原始参数。
      */
     private fun applyThermalPolicy(level: ThermalManager.Level) {
-        val preset = currentLadder[currentProfile]
-        // ⭐ 推送基准 = min(档位采集fps, 档位推流上限, 后端目标 targetOutputFps)：
-        //    此前直接用 preset.fps(采集60) → 热状态一变化(含回落NOMINAL)推送被拉回60，
-        //    后端 set_fps=15 的目标被顶掉，「采集60·推15」解耦失效
-        // ⭐⭐ §70 otg.log 复盘（2026-08-17）：OTG 的 fps 必须**彻底**豁免热控——
-        //    原 min(otgEncoderFpsCap, targetOutputFps) 里 targetOutputFps 是【自带摄像头】的
-        //    持久推送目标（常=25），OTG 推流 fps 走 otg_ 独立通道直设编码器、根本不更新它；
-        //    结果热控一触发（含回落 NOMINAL 的重算）推送被钉死 25 且永不恢复
-        //    ——客服反馈「240fps 挡只能坚持 10 分钟」即此：发热到 FAIR 掉 25，凉了也回不去。
-        //    OTG 基准=currentFps（保持 otg_ 通道下发的现值不动），只留码率缩放兜底。
-        val basePushFps = if (usingOtgCamera) currentFps
-                          else minOf(preset?.fps ?: currentFps, preset?.maxPushFps ?: 60, targetOutputFps)
-        // §70 码率基准：OTG 无档位表，原直接拿 currentBitrateKbps 当基准 → FAIR ×0.8 后
-        // 下一轮又在 0.8 的结果上再乘（单向棘轮，只降不升）。改为进热控时快照、回 NOMINAL 用快照恢复。
-        val baseMaxKbps = preset?.maxKbps ?: run {
-            if (thermalPreKbps <= 0) thermalPreKbps = currentBitrateKbps
-            val base = thermalPreKbps
-            if (level == ThermalManager.Level.NOMINAL) thermalPreKbps = -1
-            base
-        }
-
-        // ⭐ 热控只降「推送」fps + 码率，采集帧率不动（对齐 iOS：iOS 无热控、相机恒按档位采集；
-        //    编码/发送才是主要热源，降推送已能有效控温）
-        //
-        // ⭐ OTG 用更宽的档（2026-07-28）：不少国产 ROM 开机就常年上报 MODERATE(→FAIR)，
-        //    按自带摄像头的 30 一压，OTG 推流永远上不去；而 OTG 模式手机自身相机/ISP 根本没开，
-        //    发热源少一大块，FAIR 放到 60 合理。SERIOUS/CRITICAL 仍严格压（那是真热了）。
-        // ⭐⭐ 2026-08-02 OTG 的 fps 完全豁免热控（用户实测日志定案）：国产 ROM 温度上报激进，
-        //    仅推 640x480@29/2Mbps 就爬到 SERIOUS，OTG 切 320x240 采集实测 123fps 却被
-        //    「热控上限30」摁死在 30。OTG 模式手机相机/ISP 未开、编码负载小（320x240 才几百 kbps），
-        //    发热主要不来自推流——fps 不再压，码率缩放保留兜底。自带摄像头档位不变。
-        when (level) {
-            ThermalManager.Level.NOMINAL -> { thermalFpsCap = Int.MAX_VALUE; thermalBitrateScale = 1.0 }
-            ThermalManager.Level.FAIR -> {
-                thermalFpsCap = if (usingOtgCamera) Int.MAX_VALUE else 30
-                thermalBitrateScale = 0.8
-            }
-            ThermalManager.Level.SERIOUS -> {
-                thermalFpsCap = if (usingOtgCamera) Int.MAX_VALUE else 20
-                thermalBitrateScale = 0.6
-            }
-            ThermalManager.Level.CRITICAL -> {
-                thermalFpsCap = if (usingOtgCamera) Int.MAX_VALUE else 12
-                thermalBitrateScale = 0.4
-            }
-        }
-
-        // 让 PC 面板能看见"是谁摁住了 fps"（0=无限制）
-        com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.thermalCapFps =
-            if (thermalFpsCap == Int.MAX_VALUE) 0 else thermalFpsCap
-
-        val targetFps = minOf(basePushFps, thermalFpsCap).coerceAtLeast(1)
-        val targetKbps = maxOf(300, (baseMaxKbps * thermalBitrateScale).toInt())
-        Log.d(TAG, "🌡️ [热控] $level → 推送fps≤$targetFps, 码率≤${targetKbps}kbps (推送基准${basePushFps}fps=min(档位,后端目标)/${baseMaxKbps}kbps, 采集不动=${captureFps()}fps)")
-        Log.d("meidui", "⚠️ fps修改源=热控 $level → fps≤$targetFps")
-
-        // 1) 编码参数（帧率 + 码率）立即生效，平滑无重建
-        currentFps = targetFps
-        // 🔥 同步自适应基准：否则 adaptiveFps 仍停留在旧值(如30)，下次网络好触发升帧分支
-        //    minOf(上限20, 30+2)=20 反而比旧值小，打出「自适应升帧 30→20fps」的假升帧日志
-        if (adaptiveFps > targetFps) adaptiveFps = targetFps
-        currentBitrateKbps = targetKbps
-        currentMinBitrateKbps = maxOf(200, (targetKbps * 0.6).toInt())
-        if (currentConnMode == ConnMode.P2P) {
-            // ⭐ P2P：热控约束落到所有直连会话
-            p2pManager.applyBitrateToAllSessions()
-            p2pManager.applyFramerateToAllSessions()
-        } else videoSender?.let { sender ->
-            val params = sender.parameters
-            if (params.encodings.isNotEmpty()) {
-                // ⭐ 码率稳定：min=max 钉死（叠加自适应阶梯缩放），BWE 不漂移
-                val pinned = maxOf(200, (targetKbps * adaptiveBitrateScale()).toInt())
-                params.encodings[0].maxFramerate = targetFps
-                params.encodings[0].maxBitrateBps = pinned * 1000
-                params.encodings[0].minBitrateBps = pinned * 1000
-                sender.parameters = params
-            }
-        }
-
-        // 2) 采集帧率不随热控变化（captureFps()=档位帧率，与 iOS 一致）；
-        //    仍调一次 ensureCaptureFps 兜底：若采集因历史原因偏离档位值，此处拉回（值相同则无操作）
-        ensureCaptureFps("热控$level")
+        // ⭐ 2026-10-01 用户决定「彻底关闭热控对推流的影响」（对齐 iOS=无任何热控，与主版 yql-android 同改）。
+        //   让热控不再压 fps / 码率：thermalFpsCap 恒 MAX、thermalBitrateScale 恒 1.0，
+        //   下游所有 minOf(..., thermalFpsCap) 与 ×thermalBitrateScale 全部变成 no-op。
+        //   ThermalManager 仍保留监听，只记录热档位（便于诊断是否真过热），不再据此降档。
+        //   注意：码率「保质量」min=max 逻辑不动，仅移除热控这条降帧降码。
+        thermalFpsCap = Int.MAX_VALUE
+        thermalBitrateScale = 1.0
+        thermalPreKbps = -1
+        com.fz.yqlandroid.manager.uvc.UvcCapabilityStore.thermalCapFps = 0
+        Log.d(TAG, "🌡️ [热控] $level → 已禁用（不压 fps/码率，仅记录热档位）")
     }
     
     // MARK: - 🔥 动态查询摄像头能力
