@@ -1074,7 +1074,17 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             )
             lines += if (plOk) "抗频闪(powerline): ✅ 0=关/1=50Hz/2=60Hz" else "抗频闪(powerline): ✗不支持"
             // 与自带摄像头面板的差异项（PC 面板据此不渲染对应控件）
-            lines += if (sup(UVCCamera.CTRL_AE_ABS)) "快门cjfps: ✗设备支持曝光时间但库无接口" else "快门cjfps: ✗不支持"
+            // ⭐ §109.3 手动曝光/快门：设备是否支持由 CTRL_AE_ABS 决定；库无 public 方法，走反射桥接
+            run {
+                val aeOk = sup(UVCCamera.CTRL_AE_ABS) && UvcExposureBridge.isAvailable
+                val aeCur = if (aeOk) (try { UvcExposureBridge.getPercent(camera) } catch (_: Exception) { -1 }) else -1
+                controls += UvcCapabilityStore.Control("shutter", "快门/曝光", "pct", aeOk, aeCur)
+                lines += when {
+                    aeOk -> "快门/曝光(shutter): ✅ 0~100% 当前=${aeCur}%（手动曝光）"
+                    sup(UVCCamera.CTRL_AE_ABS) -> "快门/曝光(shutter): ✗库反射桥接不可用"
+                    else -> "快门/曝光(shutter): ✗设备不支持(无CTRL_AE_ABS)"
+                }
+            }
             lines += "前后摄direction: ✗OTG不适用 | 推送fps/码率/档位(按分辨率): ✅走 otg_ 独立通道"
         } catch (e: Exception) {
             lines += "能力枚举失败: ${e.message}"
@@ -1180,6 +1190,11 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     "gamma" -> camera.gamma = value
                     "gain" -> camera.gain = value
                     "powerline" -> writePowerline(camera, value)
+                    "shutter" -> {
+                        // §109.3 手动曝光/快门：先切手动模式再设绝对曝光值（百分比）
+                        UvcExposureBridge.setManualMode(camera)
+                        UvcExposureBridge.setPercent(camera, value)
+                    }
                     else -> {
                         Log.d("meidui", "🔌 [OTG控制] 未知控制项 $key，忽略")
                         return@post
