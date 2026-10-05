@@ -966,6 +966,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         uvcCamera = null
         releaseDummySurface()
         defaultControlValues.clear()
+        UvcExposureBridge.onCameraClosed()
         formatBlacklist.clear()
         knownGoodFps.clear()
         fpsBlacklist.clear()      // §56.12 换设备/重插，实测黑名单作废
@@ -1077,10 +1078,17 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             // ⭐ §109.3 手动曝光/快门：设备是否支持由 CTRL_AE_ABS 决定；库无 public 方法，走反射桥接
             run {
                 val aeOk = sup(UVCCamera.CTRL_AE_ABS) && UvcExposureBridge.isAvailable
-                val aeCur = if (aeOk) (try { UvcExposureBridge.getPercent(camera) } catch (_: Exception) { -1 }) else -1
+                // §115 首次枚举=相机刚打开：记下原始 AE 模式，「自动曝光」开关/还原据此恢复
+                if (aeOk && defaultControlValues.isEmpty()) UvcExposureBridge.onCameraOpened(camera)
+                val fps = fpsForExposure()
+                val auto = aeOk && UvcExposureBridge.isAuto(camera)
+                val aeCur = if (aeOk) (try { UvcExposureBridge.getPercent(camera, fps) } catch (_: Exception) { -1 }) else -1
+                // §115 自动曝光开关放在快门前：关=锁住当前曝光切手动，开=回到设备原始 AE 模式
+                controls += UvcCapabilityStore.Control("autoExposure", "自动曝光", "bool", aeOk, if (auto) 1 else 0, 0, 1)
                 controls += UvcCapabilityStore.Control("shutter", "快门/曝光", "pct", aeOk, aeCur)
                 lines += when {
-                    aeOk -> "快门/曝光(shutter): ✅ 0~100% 当前=${aeCur}%（手动曝光）"
+                    aeOk -> "快门/曝光(shutter): ✅ 0~100% 当前=${aeCur}%（${if (auto) "自动曝光中，拖动即切手动" else "手动曝光"}，" +
+                            "对数映射 0.5ms~1/${fps}s）"
                     sup(UVCCamera.CTRL_AE_ABS) -> "快门/曝光(shutter): ✗库反射桥接不可用"
                     else -> "快门/曝光(shutter): ✗设备不支持(无CTRL_AE_ABS)"
                 }
@@ -1145,11 +1153,16 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             return
         }
         var n = 0
-        caps.controls.filter { it.supported }.forEach { c ->
+        // §115 快门不写回开机百分比（那会把相机切进手动曝光），改为恢复自动曝光
+        caps.controls.filter { it.supported && it.key != "shutter" && it.key != "autoExposure" }.forEach { c ->
             val def = defaultControlValues[c.key] ?: return@forEach
             if (applyControl(c.key, def)) n++
         }
-        Log.d("meidui", "🔌 [OTG还原] 已回落 $n 项到出厂缺省")
+        if (caps.controls.any { it.key == "autoExposure" && it.supported }) {
+            uvcHandler?.post { uvcCamera?.let { UvcExposureBridge.setAutoMode(it) } }
+            n++
+        }
+        Log.d("meidui", "🔌 [OTG还原] 已回落 $n 项到出厂缺省（曝光=恢复自动）")
         // 等下发落地后重新枚举一次，PC 面板的滑条随 controls[].cur 归位
         uvcHandler?.postDelayed({ uvcCamera?.let { dumpCapabilitiesLocked(it) } }, 300)
     }
@@ -1192,8 +1205,17 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     "powerline" -> writePowerline(camera, value)
                     "shutter" -> {
                         // §109.3 手动曝光/快门：先切手动模式再设绝对曝光值（百分比）
+                        // §115 自动→手动时刷新能力快照，PC 面板的「自动曝光」开关随之变关
+                        val wasManual = UvcExposureBridge.manualActive
                         UvcExposureBridge.setManualMode(camera)
-                        UvcExposureBridge.setPercent(camera, value)
+                        UvcExposureBridge.setPercent(camera, value, fpsForExposure())
+                        if (!wasManual) refreshCapsSoon()
+                    }
+                    "autoExposure" -> {
+                        // §115 开=恢复设备原始 AE 模式；关=锁住当前曝光值切手动（画面不跳）
+                        if (value != 0) UvcExposureBridge.setAutoMode(camera)
+                        else UvcExposureBridge.setManualMode(camera)
+                        refreshCapsSoon()
                     }
                     else -> {
                         Log.d("meidui", "🔌 [OTG控制] 未知控制项 $key，忽略")
@@ -1216,6 +1238,18 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         try { camera.powerlineFrequency = value } catch (t: Throwable) {
             Log.d("meidui", "🔌 [OTG控制] powerline 下发失败: ${t.message}")
         }
+    }
+
+    /** §115 快门上限 = 一帧时长：协商帧率优先，其次实测帧率，都没有按 30fps */
+    private fun fpsForExposure(): Int = when {
+        negotiatedFps > 0 -> negotiatedFps
+        measuredFps > 0 -> measuredFps
+        else -> 30
+    }
+
+    /** §115 曝光模式变了：稍后重枚举一次，PC 面板的自动曝光开关/快门滑条随之归位 */
+    private fun refreshCapsSoon() {
+        uvcHandler?.postDelayed({ uvcCamera?.let { dumpCapabilitiesLocked(it) } }, 300)
     }
 
     /**
