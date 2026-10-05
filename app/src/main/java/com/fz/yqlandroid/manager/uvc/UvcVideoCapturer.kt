@@ -967,6 +967,11 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         releaseDummySurface()
         defaultControlValues.clear()
         UvcExposureBridge.onCameraClosed()
+        agcActive = false
+        uvcHandler?.removeCallbacks(agcTick)
+        autoGainEnabled = true
+        gainBeforeManual = -1
+        lastMeanY = -1
         formatBlacklist.clear()
         knownGoodFps.clear()
         fpsBlacklist.clear()      // §56.12 换设备/重插，实测黑名单作废
@@ -1086,6 +1091,12 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 // §115 自动曝光开关放在快门前：关=锁住当前曝光切手动，开=回到设备原始 AE 模式
                 controls += UvcCapabilityStore.Control("autoExposure", "自动曝光", "bool", aeOk, if (auto) 1 else 0, 0, 1)
                 controls += UvcCapabilityStore.Control("shutter", "快门/曝光", "pct", aeOk, aeCur)
+                // §115b 手动曝光时按画面亮度自动补增益；用户拖增益滑条即自动关闭
+                val agOk = aeOk && sup(UVCCamera.PU_GAIN)
+                controls += UvcCapabilityStore.Control("autoGain", "自动增益", "bool", agOk,
+                    if (autoGainEnabled) 1 else 0, 0, 1)
+                lines += if (agOk) "自动增益(autoGain): ✅ 当前=${if (autoGainEnabled) "开" else "关"}" +
+                        "（${if (agcActive) "运行中" else "手动曝光时才运行"}）" else "自动增益(autoGain): ✗需同时支持快门与增益"
                 lines += when {
                     aeOk -> "快门/曝光(shutter): ✅ 0~100% 当前=${aeCur}%（${if (auto) "自动曝光中，拖动即切手动" else "手动曝光"}，" +
                             "对数映射 0.5ms~1/${fps}s）"
@@ -1153,13 +1164,28 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             return
         }
         var n = 0
-        // §115 快门不写回开机百分比（那会把相机切进手动曝光），改为恢复自动曝光
-        caps.controls.filter { it.supported && it.key != "shutter" && it.key != "autoExposure" }.forEach { c ->
-            val def = defaultControlValues[c.key] ?: return@forEach
-            if (applyControl(c.key, def)) n++
+        // §115b 先停 AGC，免得它在写回出厂增益与切回自动曝光之间又改一次增益
+        uvcHandler?.post {
+            uvcHandler?.removeCallbacks(agcTick)
+            agcActive = false
         }
+        // §115 快门不写回开机百分比（那会把相机切进手动曝光），改为恢复自动曝光
+        caps.controls.filter {
+            it.supported && it.key != "shutter" && it.key != "autoExposure" && it.key != "autoGain"
+        }.forEach { c ->
+            val def = defaultControlValues[c.key] ?: return@forEach
+            if (applyControl(c.key, def, fromRestore = true)) n++
+        }
+        // §115b 还原 = 自动增益回到默认开；增益已回落出厂值，不再在退出手动时写回进手动前的值
+        autoGainEnabled = true
+        gainBeforeManual = -1
         if (caps.controls.any { it.key == "autoExposure" && it.supported }) {
-            uvcHandler?.post { uvcCamera?.let { UvcExposureBridge.setAutoMode(it) } }
+            uvcHandler?.post {
+                uvcCamera?.let {
+                    UvcExposureBridge.setAutoMode(it)
+                    updateAgcLocked()
+                }
+            }
             n++
         }
         Log.d("meidui", "🔌 [OTG还原] 已回落 $n 项到出厂缺省（曝光=恢复自动）")
@@ -1176,7 +1202,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
      *
      * @return true=已排进下发队列；false=无相机/不支持
      */
-    fun applyControl(key: String, value: Int): Boolean {
+    fun applyControl(key: String, value: Int, fromRestore: Boolean = false): Boolean {
         val camera = uvcCamera ?: run {
             Log.d("meidui", "🔌 [OTG控制] $key=$value 忽略：UVC相机未打开")
             return false
@@ -1201,20 +1227,35 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     "hue" -> camera.hue = value
                     "sharpness" -> camera.sharpness = value
                     "gamma" -> camera.gamma = value
-                    "gain" -> camera.gain = value
+                    "gain" -> {
+                        camera.gain = value
+                        // §115b 用户亲手拖增益 = 接管增益：自动增益关掉，面板开关随之变关
+                        if (!fromRestore && autoGainEnabled) {
+                            autoGainEnabled = false
+                            Log.d("meidui", "🔆 [OTG自动增益] 用户手动设增益=$value% → 自动增益关闭")
+                            updateAgcLocked()
+                            refreshCapsSoon()
+                        }
+                    }
                     "powerline" -> writePowerline(camera, value)
                     "shutter" -> {
                         // §109.3 手动曝光/快门：先切手动模式再设绝对曝光值（百分比）
                         // §115 自动→手动时刷新能力快照，PC 面板的「自动曝光」开关随之变关
                         val wasManual = UvcExposureBridge.manualActive
-                        UvcExposureBridge.setManualMode(camera)
+                        if (!wasManual) enterManualLocked(camera)
                         UvcExposureBridge.setPercent(camera, value, fpsForExposure())
                         if (!wasManual) refreshCapsSoon()
                     }
                     "autoExposure" -> {
                         // §115 开=恢复设备原始 AE 模式；关=锁住当前曝光值切手动（画面不跳）
-                        if (value != 0) UvcExposureBridge.setAutoMode(camera)
-                        else UvcExposureBridge.setManualMode(camera)
+                        if (value != 0) exitManualLocked(camera)
+                        else enterManualLocked(camera)
+                        refreshCapsSoon()
+                    }
+                    "autoGain" -> {
+                        // §115b 手动曝光时按画面亮度自动调增益（自动曝光时不起作用）
+                        autoGainEnabled = value != 0
+                        updateAgcLocked()
                         refreshCapsSoon()
                     }
                     else -> {
@@ -1250,6 +1291,95 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
     /** §115 曝光模式变了：稍后重枚举一次，PC 面板的自动曝光开关/快门滑条随之归位 */
     private fun refreshCapsSoon() {
         uvcHandler?.postDelayed({ uvcCamera?.let { dumpCapabilitiesLocked(it) } }, 300)
+    }
+
+    // ===== §115b 手动曝光时的自动增益（AGC）=====
+    // 手动快门一短画面就暗，而 UVC 关掉 AE 后增益不会自己跟。这里按画面实际亮度闭环调增益：
+    // 帧回调稀疏测光 → 每 AGC_INTERVAL_MS 调一步。用户亲手拖增益即视为接管（autoGainEnabled=false），
+    // 不和增益滑条打架；回到自动曝光时增益恢复到进手动前的值。
+
+    /** 「自动增益」开关（默认开），仅在手动曝光时生效 */
+    @Volatile private var autoGainEnabled = true
+    /** AGC 是否正在运行（= 开关开 && 手动曝光 && 设备支持增益） */
+    @Volatile private var agcActive = false
+    /** 帧回调测得的最新画面平均亮度 0~255；-1=还没测 */
+    @Volatile private var lastMeanY = -1
+    /** 进手动曝光前的增益%，退出手动时写回（-1=无需写回） */
+    private var gainBeforeManual = -1
+    private var agcTopWarned = false
+
+    private val AGC_TARGET_Y = 115
+    private val AGC_DEADBAND = 18
+    private val AGC_INTERVAL_MS = 500L
+
+    private val agcTick = object : Runnable {
+        override fun run() {
+            agcStepLocked()
+            if (agcActive) uvcHandler?.postDelayed(this, AGC_INTERVAL_MS)
+        }
+    }
+
+    private fun gainSupported(): Boolean =
+        UvcCapabilityStore.caps.value?.controls?.any { it.key == "gain" && it.supported } == true
+
+    /** 自动 → 手动曝光：记下当前增益（退出时写回），切手动，按需启动 AGC */
+    private fun enterManualLocked(camera: UVCCamera) {
+        if (!UvcExposureBridge.manualActive && gainSupported()) {
+            gainBeforeManual = try { camera.gain } catch (_: Throwable) { -1 }
+        }
+        UvcExposureBridge.setManualMode(camera)
+        updateAgcLocked()
+    }
+
+    /** 手动 → 自动曝光：停 AGC，增益写回进手动前的值（用户已接管增益则不动） */
+    private fun exitManualLocked(camera: UVCCamera) {
+        UvcExposureBridge.setAutoMode(camera)
+        updateAgcLocked()
+        if (autoGainEnabled && gainBeforeManual >= 0) {
+            try { camera.gain = gainBeforeManual } catch (_: Throwable) {}
+            Log.d("meidui", "🔆 [OTG自动增益] 回到自动曝光，增益恢复为 $gainBeforeManual%")
+        }
+        gainBeforeManual = -1
+    }
+
+    /** 按当前状态启停 AGC（必须在 uvcThread） */
+    private fun updateAgcLocked() {
+        val want = autoGainEnabled && UvcExposureBridge.manualActive && gainSupported() && uvcCamera != null
+        if (want == agcActive) return
+        agcActive = want
+        uvcHandler?.removeCallbacks(agcTick)
+        if (want) {
+            agcTopWarned = false
+            lastMeanY = -1
+            uvcHandler?.postDelayed(agcTick, AGC_INTERVAL_MS)
+            Log.d("meidui", "🔆 [OTG自动增益] 启动：目标亮度 Y=$AGC_TARGET_Y±$AGC_DEADBAND")
+        } else {
+            Log.d("meidui", "🔆 [OTG自动增益] 停止")
+        }
+    }
+
+    /** 一步闭环：偏暗加增益、偏亮减增益，Y 差约 6 ≈ 1% 增益，单步 -6%~+8% */
+    private fun agcStepLocked() {
+        val camera = uvcCamera ?: return
+        if (!agcActive) return
+        val y = lastMeanY
+        if (y < 0) return
+        val err = AGC_TARGET_Y - y
+        if (Math.abs(err) <= AGC_DEADBAND) return
+        val cur = try { camera.gain } catch (_: Throwable) { return }
+        var step = (err / 6).coerceIn(-6, 8)
+        if (step == 0) step = if (err > 0) 1 else -1
+        val next = (cur + step).coerceIn(0, 100)
+        if (next == cur) {
+            if (err > 0 && cur >= 100 && !agcTopWarned) {
+                agcTopWarned = true
+                Log.d("meidui", "🔆 [OTG自动增益] 增益已到顶 100% 仍偏暗(Y=$y)：需放慢快门或补光")
+            }
+            return
+        }
+        try { camera.gain = next } catch (_: Throwable) { return }
+        if (next < 100) agcTopWarned = false
+        Log.d("meidui", "🔆 [OTG自动增益] Y=$y → 增益 $cur%→$next%")
     }
 
     /**
@@ -1339,6 +1469,25 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 val t = data[i]; data[i] = data[i + 1]; data[i + 1] = t
                 i += 2
             }
+        }
+        // §115b 自动增益测光：仅 AGC 运行时每 5 帧在整幅画面稀疏取 ~24x14 个 Y 点求均值（开销可忽略）
+        if (agcActive && frameCbCount % 5L == 0L) {
+            var s = 0L
+            var n = 0
+            val stepX = maxOf(1, w / 24)
+            val stepY = maxOf(1, h / 14)
+            var row = stepY / 2
+            while (row < h) {
+                val base = row * w
+                var col = stepX / 2
+                while (col < w) {
+                    s += data[base + col].toInt() and 0xFF
+                    n++
+                    col += stepX
+                }
+                row += stepY
+            }
+            if (n > 0) lastMeanY = (s / n).toInt()
         }
         // ⭐ 2026-08-03 颜色诊断（查"OTG颜色不正"）：第10帧 + 之后每600帧，采样中心块 Y/V/U 均值
         //   上报自诊断通道。NV21 色度平面 V 前 U 后——**对着纯红色物体**：正常应 V≫128 且 U≪128；
