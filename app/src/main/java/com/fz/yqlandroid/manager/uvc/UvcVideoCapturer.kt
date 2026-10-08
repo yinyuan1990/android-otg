@@ -405,6 +405,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             camera.open(ctrlBlock)
             uvcCamera = camera
             currentDeviceName = device.productName ?: device.deviceName
+            currentDeviceKey = "%04X:%04X".format(device.vendorId, device.productId)
             // §56.18：UVCCamera.open() 内部已调过一次 nativeSetPreviewSize(第一个尺寸,[1,31],MJPEG)，
             // native 侧有残留状态且内容未知 → 置为未知，首次协商强制走翻转脏化保证真谈判
             resetNativeStoredState()
@@ -1088,6 +1089,13 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 val fps = fpsForExposure()
                 val auto = aeOk && UvcExposureBridge.isAuto(camera)
                 val aeCur = if (aeOk) (try { UvcExposureBridge.getPercent(camera, fps) } catch (_: Exception) { -1 }) else -1
+                // §117 AE 优先级：默认帧率恒定（0）；开=允许摄像头暗光下为了亮度降帧率（1）
+                val prioOk = aeOk && UvcExposureBridge.aePrioritySupported(camera)
+                val prio = if (prioOk) UvcExposureBridge.getAePriority(camera) else -1
+                controls += UvcCapabilityStore.Control("aePriority", "暗光降帧保亮度", "bool", prioOk,
+                    if (prio == 1) 1 else 0, 0, 1)
+                lines += if (prioOk) "AE优先级(aePriority): ✅ 当前=${when (prio) { 0 -> "帧率恒定"; 1 -> "允许暗光降帧"; else -> "读不到" }}"
+                         else "AE优先级(aePriority): ✗设备或库不支持"
                 // §115 自动曝光开关放在快门前：关=锁住当前曝光切手动，开=回到设备原始 AE 模式
                 controls += UvcCapabilityStore.Control("autoExposure", "自动曝光", "bool", aeOk, if (auto) 1 else 0, 0, 1)
                 controls += UvcCapabilityStore.Control("shutter", "快门/曝光", "pct", aeOk, aeCur)
@@ -1095,8 +1103,11 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 val agOk = aeOk && sup(UVCCamera.PU_GAIN)
                 controls += UvcCapabilityStore.Control("autoGain", "自动增益", "bool", agOk,
                     if (autoGainEnabled) 1 else 0, 0, 1)
+                val hwSp = UvcExposureBridge.manualActive &&
+                        UvcExposureBridge.currentManualMode == UvcExposureBridge.AE_MODE_SHUTTER_PRIORITY
                 lines += if (agOk) "自动增益(autoGain): ✅ 当前=${if (autoGainEnabled) "开" else "关"}" +
-                        "（${if (agcActive) "运行中" else "手动曝光时才运行"}）" else "自动增益(autoGain): ✗需同时支持快门与增益"
+                        "（${when { hwSp -> "快门优先，摄像头硬件调增益"; agcActive -> "软件AGC运行中"; else -> "手动曝光时才运行" }}）"
+                         else "自动增益(autoGain): ✗需同时支持快门与增益"
                 lines += when {
                     aeOk -> "快门/曝光(shutter): ✅ 0~100% 当前=${aeCur}%（${if (auto) "自动曝光中，拖动即切手动" else "手动曝光"}，" +
                             "对数映射 0.5ms~1/${fps}s）"
@@ -1133,7 +1144,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             version = System.currentTimeMillis()
         )
         // 首次枚举（相机刚打开）时把各项当前值记为出厂缺省，供「还原」回落
-        if (defaultControlValues.isEmpty()) {
+        val firstEnumeration = defaultControlValues.isEmpty()
+        if (firstEnumeration) {
             controls.filter { it.supported && it.cur >= 0 }.forEach { defaultControlValues[it.key] = it.cur }
             if (defaultControlValues.isNotEmpty()) {
                 Log.d("meidui", "🔌 [OTG] 已记录出厂缺省: " +
@@ -1141,6 +1153,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             }
         }
         UvcCapabilityStore.set(lines, caps)
+        // §117 刚打开：默认帧率恒定 + 重放该摄像头上次用户调过的参数（排在本次枚举之后，能力快照已就绪）
+        if (firstEnumeration) uvcHandler?.post { applyOpenDefaultsAndReplayLocked() }
         lines.forEach { Log.d("meidui", "🔌 [OTG能力] $it") }
         // 能力一变就主动推给 PC（PC 据此重建面板），不等 PC 来问
         try { onCapsUpdated?.invoke() } catch (_: Exception) {}
@@ -1170,8 +1184,10 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             agcActive = false
         }
         // §115 快门不写回开机百分比（那会把相机切进手动曝光），改为恢复自动曝光
+        // §117 还原 = 忘掉该摄像头记住的用户参数
+        clearUserControls()
         caps.controls.filter {
-            it.supported && it.key != "shutter" && it.key != "autoExposure" && it.key != "autoGain"
+            it.supported && it.key !in setOf("shutter", "autoExposure", "autoGain", "aePriority")
         }.forEach { c ->
             val def = defaultControlValues[c.key] ?: return@forEach
             if (applyControl(c.key, def, fromRestore = true)) n++
@@ -1183,12 +1199,14 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             uvcHandler?.post {
                 uvcCamera?.let {
                     UvcExposureBridge.setAutoMode(it)
+                    // §117 AE 优先级回到我们的默认（帧率恒定），不回出厂值——出厂多为允许降帧，暗光会掉到 6~8fps
+                    if (UvcExposureBridge.aePrioritySupported(it)) UvcExposureBridge.setAePriority(it, false)
                     updateAgcLocked()
                 }
             }
             n++
         }
-        Log.d("meidui", "🔌 [OTG还原] 已回落 $n 项到出厂缺省（曝光=恢复自动）")
+        Log.d("meidui", "🔌 [OTG还原] 已回落 $n 项到出厂缺省（曝光=恢复自动，AE优先级=帧率恒定，已清除记住的参数）")
         // 等下发落地后重新枚举一次，PC 面板的滑条随 controls[].cur 归位
         uvcHandler?.postDelayed({ uvcCamera?.let { dumpCapabilitiesLocked(it) } }, 300)
     }
@@ -1202,7 +1220,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
      *
      * @return true=已排进下发队列；false=无相机/不支持
      */
-    fun applyControl(key: String, value: Int, fromRestore: Boolean = false): Boolean {
+    fun applyControl(key: String, value: Int, fromRestore: Boolean = false, replay: Boolean = false): Boolean {
         val camera = uvcCamera ?: run {
             Log.d("meidui", "🔌 [OTG控制] $key=$value 忽略：UVC相机未打开")
             return false
@@ -1213,6 +1231,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             Log.d("meidui", "🔌 [OTG控制] $key=$value 忽略：该设备不支持此项")
             return false
         }
+        // §117 用户亲手调的才记（还原/重放不记），重插后按 silu 同款顺序重放
+        if (!fromRestore && !replay) recordUserControl(key, value)
         uvcHandler?.post {
             try {
                 when (key) {
@@ -1255,7 +1275,14 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     "autoGain" -> {
                         // §115b 手动曝光时按画面亮度自动调增益（自动曝光时不起作用）
                         autoGainEnabled = value != 0
+                        // §117 正在手动曝光：开=改走快门优先(摄像头硬件调增益，不支持回落软件AGC)，关=纯手动
+                        if (UvcExposureBridge.manualActive) UvcExposureBridge.setManualMode(camera, autoGainEnabled)
                         updateAgcLocked()
+                        refreshCapsSoon()
+                    }
+                    "aePriority" -> {
+                        // §117 0=帧率恒定（默认）；1=允许摄像头暗光下为了亮度降帧率
+                        UvcExposureBridge.setAePriority(camera, value != 0)
                         refreshCapsSoon()
                     }
                     else -> {
@@ -1281,16 +1308,97 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         }
     }
 
-    /** §115 快门上限 = 一帧时长：协商帧率优先，其次实测帧率，都没有按 30fps */
-    private fun fpsForExposure(): Int = when {
-        negotiatedFps > 0 -> negotiatedFps
-        measuredFps > 0 -> measuredFps
-        else -> 30
-    }
+    /**
+     * 快门上限 = 一帧时长，按**推流请求的帧率**算（§117）。
+     * 不用实测帧率：实测随掉帧在 8~60 乱跳，fps=8 时会放行 125ms 长曝光把帧率进一步压低（10-08 日志实锤）。
+     */
+    private fun fpsForExposure(): Int = if (requestedFps > 0) requestedFps else 30
 
     /** §115 曝光模式变了：稍后重枚举一次，PC 面板的自动曝光开关/快门滑条随之归位 */
     private fun refreshCapsSoon() {
         uvcHandler?.postDelayed({ uvcCamera?.let { dumpCapabilitiesLocked(it) } }, 300)
+    }
+
+    // ===== §117 用户参数记忆（按摄像头 VID:PID，存 SharedPreferences，重插/重开/重启 App 后重放）=====
+
+    /** 当前摄像头标识 VID:PID（十六进制），记忆按它分开存——换一款摄像头不会套用别款的参数 */
+    @Volatile private var currentDeviceKey = ""
+    /** 当前摄像头记住的用户参数（key → 值），读写都加锁：记录在调用方线程，重放在 uvcThread */
+    private val userControls = LinkedHashMap<String, Int>()
+    private val userPrefs by lazy {
+        appContext.getSharedPreferences("otg_user_controls", android.content.Context.MODE_PRIVATE)
+    }
+
+    /** 重放顺序（同 silu：抗频闪 → AE优先级 → 曝光模式/快门 → 增益 → 白平衡 → 画质 → 对焦/变焦） */
+    private val REPLAY_ORDER = listOf(
+        "powerline", "aePriority", "autoGain", "autoExposure", "shutter", "gain",
+        "autoWhiteBalance", "whiteBalance", "brightness", "contrast", "saturation", "sharpness",
+        "hue", "gamma", "autoFocus", "focus", "zoom",
+    )
+
+    /** 记一条用户操作，并处理依赖：快门⇒关自动曝光、开自动曝光⇒作废快门；增益⇒关自动增益、开自动增益⇒作废增益 */
+    private fun recordUserControl(key: String, value: Int) {
+        if (currentDeviceKey.isEmpty() || key !in REPLAY_ORDER) return
+        synchronized(userControls) {
+            when (key) {
+                "shutter" -> userControls["autoExposure"] = 0
+                "autoExposure" -> if (value != 0) userControls.remove("shutter")
+                "gain" -> userControls["autoGain"] = 0
+                "autoGain" -> if (value != 0) userControls.remove("gain")
+            }
+            userControls[key] = value
+            saveUserControlsLocked()
+        }
+    }
+
+    private fun saveUserControlsLocked() {
+        val s = userControls.entries.joinToString(",") { "${it.key}=${it.value}" }
+        userPrefs.edit().putString(currentDeviceKey, s).apply()
+    }
+
+    private fun loadUserControls(deviceKey: String) {
+        synchronized(userControls) {
+            userControls.clear()
+            val s = userPrefs.getString(deviceKey, null) ?: return
+            s.split(',').forEach { kv ->
+                val i = kv.indexOf('=')
+                if (i > 0) kv.substring(i + 1).toIntOrNull()?.let { userControls[kv.substring(0, i)] = it }
+            }
+        }
+    }
+
+    private fun clearUserControls() {
+        synchronized(userControls) {
+            userControls.clear()
+            if (currentDeviceKey.isNotEmpty()) userPrefs.edit().remove(currentDeviceKey).apply()
+        }
+        Log.d("meidui", "🔌 [OTG记忆] 已清除 $currentDeviceKey 记住的参数")
+    }
+
+    /** 相机刚打开（首次枚举之后）：默认帧率恒定，再按顺序重放该摄像头记住的用户参数 */
+    private fun applyOpenDefaultsAndReplayLocked() {
+        val camera = uvcCamera ?: return
+        loadUserControls(currentDeviceKey)
+        val saved = synchronized(userControls) { LinkedHashMap(userControls) }
+        if (!saved.containsKey("aePriority") && UvcExposureBridge.aePrioritySupported(camera)) {
+            UvcExposureBridge.setAePriority(camera, false)
+        }
+        if (saved.isEmpty()) {
+            Log.d("meidui", "🔌 [OTG记忆] $currentDeviceKey 无记住的参数（默认：帧率恒定）")
+            refreshCapsSoon()
+            return
+        }
+        Log.d("meidui", "🔌 [OTG记忆] $currentDeviceKey 重放: " +
+                REPLAY_ORDER.filter { saved.containsKey(it) }.joinToString(" ") { "$it=${saved[it]}" })
+        REPLAY_ORDER.forEach { k -> saved[k]?.let { applyControl(k, it, replay = true) } }
+        refreshCapsSoon()
+    }
+
+    /** 切回自动曝光后重设 AE 优先级（个别摄像头换模式会把它复位）：按用户记的，没记就帧率恒定 */
+    private fun reassertAePriorityLocked(camera: UVCCamera) {
+        if (!UvcExposureBridge.aePrioritySupported(camera)) return
+        val allowDrop = synchronized(userControls) { userControls["aePriority"] == 1 }
+        UvcExposureBridge.setAePriority(camera, allowDrop)
     }
 
     // ===== §115b 手动曝光时的自动增益（AGC）=====
@@ -1327,13 +1435,15 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         if (!UvcExposureBridge.manualActive && gainSupported()) {
             gainBeforeManual = try { camera.gain } catch (_: Throwable) { -1 }
         }
-        UvcExposureBridge.setManualMode(camera)
+        // §117 自动增益开着就先试快门优先（摄像头硬件调增益），不支持再回落纯手动 + 软件 AGC
+        UvcExposureBridge.setManualMode(camera, preferShutterPriority = autoGainEnabled)
         updateAgcLocked()
     }
 
     /** 手动 → 自动曝光：停 AGC，增益写回进手动前的值（用户已接管增益则不动） */
     private fun exitManualLocked(camera: UVCCamera) {
         UvcExposureBridge.setAutoMode(camera)
+        reassertAePriorityLocked(camera)
         updateAgcLocked()
         if (autoGainEnabled && gainBeforeManual >= 0) {
             try { camera.gain = gainBeforeManual } catch (_: Throwable) {}
@@ -1344,7 +1454,10 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
 
     /** 按当前状态启停 AGC（必须在 uvcThread） */
     private fun updateAgcLocked() {
-        val want = autoGainEnabled && UvcExposureBridge.manualActive && gainSupported() && uvcCamera != null
+        // §117 快门优先(4)由摄像头自己调增益，软件 AGC 只在纯手动(1)下跑，免得两个控制器抢增益
+        val want = autoGainEnabled && UvcExposureBridge.manualActive &&
+                UvcExposureBridge.currentManualMode == UvcExposureBridge.AE_MODE_MANUAL &&
+                gainSupported() && uvcCamera != null
         if (want == agcActive) return
         agcActive = want
         uvcHandler?.removeCallbacks(agcTick)
