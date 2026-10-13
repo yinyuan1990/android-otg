@@ -71,9 +71,9 @@ object OtgBitratePlan {
         return kbps.coerceIn(MIN_KBPS, MAX_KBPS)
     }
 
-    /** 给能力快照里的每一档分辨率填上码率上限（PC 面板据此显示实际 kbps） */
+    /** 给能力快照里的每一档分辨率填上码率上限（PC 面板据此显示实际 kbps）；帧率按后台 OTG 最高帧率封顶后再算 */
     fun annotate(sizes: List<UvcCapabilityStore.SizeOption>): List<UvcCapabilityStore.SizeOption> =
-        sizes.map { it.copy(maxKbps = ceilingFor(it.width, it.height, it.maxFps)) }
+        sizes.map { it.copy(maxKbps = ceilingFor(it.width, it.height, OtgFpsLimit.clamp(it.maxFps))) }
 
     fun minKbpsOf(maxKbps: Int): Int = (maxKbps * MIN_RATIO).roundToInt().coerceAtLeast(MIN_KBPS)
 }

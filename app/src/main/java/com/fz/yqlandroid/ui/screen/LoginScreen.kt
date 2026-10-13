@@ -473,6 +473,8 @@ fun LoginScreen(
                                     //   后端没配=下发 null → 清掉本地覆盖回内置默认（便于后台改回默认）。
                                     com.fz.yqlandroid.manager.LadderConfigStore.saveFromLogin(
                                         context, response.videoLadder?.toString())
+                                    com.fz.yqlandroid.manager.uvc.OtgFpsLimit.saveFromLogin(
+                                        context, response.otgMaxFps)
 
                                     // 🔥 Step 3: 更新ViewModel
                                     appViewModel.loginSuccess(

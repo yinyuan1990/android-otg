@@ -14,10 +14,11 @@ import com.jiangdg.uvc.IFrameCallback
 import com.jiangdg.uvc.UVCCamera
 import android.view.Surface
 import org.webrtc.CapturerObserver
-import org.webrtc.NV21Buffer
+import org.webrtc.NV12Buffer
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoFrame
+import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -30,8 +31,9 @@ import java.util.concurrent.TimeUnit
  *
  * 帧路径（CPU NV21，参考 saki/OpenCVwithUVC 同款）：
  *   libuvc 协商 MJPEG（USB2.0 带宽下 1080p30 必须 MJPEG，libuvc 内置 jpeg-turbo 解码）
- *   → IFrameCallback(NV21 直存 ByteBuffer) → 复制进池化 byte[]
- *   → [NV21Buffer] → capturerObserver.onFrameCaptured()（libwebrtc 编码前自动转 I420）。
+ *   → IFrameCallback(标着 NV21、实为 NV12 的直存 ByteBuffer) → 复制进池化直接内存
+ *   → [NV12Buffer] → capturerObserver.onFrameCaptured()（libwebrtc 编码前自动转 I420）。
+ *   出帧确认后摘掉 native 占位预览窗口（见 [detachPreviewWindowLocked]），native 不再每帧转 RGBA 画窗口。
  *
  * 生命周期：startCapture 启动 [UvcDeviceMonitor]，设备授权后自动开流；
  * 推流中拔线 → 停帧（左上角「采集0」可见），插回自动恢复；stopCapture/dispose 反向拆除。
@@ -40,9 +42,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
 
     companion object {
         private const val TAG = "UvcVideoCapturer"
-        /** ⭐ 2026-08-04：native "NV21" 回调实为 NV12（U/V 对调，OTG 皮肤发蓝实锤），
-         *  帧回调里逐对交换色度字节纠正。若将来遇到不需要交换的设备/库版本，改 false 即可。 */
-        private const val UV_SWAP = true
+        /** 摘掉占位预览窗口后多久检查一次是否还在出帧（ms） */
+        private const val DETACH_CHECK_MS = 1500L
         /**
          * ⭐ 设备**没声明**每档 fps 时，向 libuvc 请求的帧率上限（探测用）。
          *
@@ -108,12 +109,17 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
     private var dummyReaderW = 0
     private var dummyReaderH = 0
 
+    // §127 占位窗口只在起流瞬间需要：出帧后摘掉，native 不再每帧转 RGBA 画进窗口（2592x1944 每帧 ~20MB）。
+    //   摘窗后不出帧的设备按 VID:PID 记住（本进程内），以后不再摘
+    @Volatile private var previewDetached = false
+    private val detachUnsupported = HashSet<String>()
+
     // WebRTC 请求的目标格式（UVC 侧就近协商）
     @Volatile private var requestedWidth = 1280
     @Volatile private var requestedHeight = 720
     @Volatile private var requestedFps = 30
 
-    // UVC 实际协商出的帧格式（NV21Buffer 必须用这个尺寸）
+    // UVC 实际协商出的帧格式（NV12Buffer 必须用这个尺寸）
     @Volatile private var frameWidth = 0
     @Volatile private var frameHeight = 0
 
@@ -281,8 +287,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
     @Volatile private var capturing = false        // startCapture ~ stopCapture 区间
     @Volatile private var streamRunning = false    // UVC 相机已开流
 
-    // NV21 字节数组复用池（1080p30 每秒 ~45MB，若每帧新分配 GC 压力巨大）
-    private val bufferPool = ArrayBlockingQueue<ByteArray>(4)
+    // NV12 直接内存复用池（1080p30 每秒 ~45MB，若每帧新分配 GC 压力巨大）
+    private val bufferPool = ArrayBlockingQueue<ByteBuffer>(4)
     @Volatile private var badFrameCount = 0L
 
     // ⭐ [诊断] IFrameCallback 原始命中数（在任何 early-return 之前自增）——用于「开流后无帧」看门狗
@@ -638,6 +644,7 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 Log.d("meidui", "🔌 [OTG] ✅ IFrameCallback正常：${NO_FRAME_TIMEOUT_MS}ms内${frameCbCount}帧 " +
                         "${frameWidth}x${frameHeight}（登记可用配置 ${fmtName(activeFormatInt)}@${acceptedFps}fps）")
                 dumpCapabilitiesLocked(camera)   // 出帧确认后刷新能力快照（协商尺寸/当前值已最终定）
+                detachPreviewWindowLocked(camera)
                 scheduleFpsSample(camera)        // 再等画面稳下来单独测一次帧率
                 return@Runnable
             }
@@ -793,6 +800,44 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         return reader.surface
     }
 
+    /**
+     * 出帧确认后摘掉占位窗口：libuvc 窗口为空时跳过每帧 RGBA 转换+拷贝，只做 MJPEG 解码与帧回调。
+     * 10-13 日志：帧率随像素量下降（1080p 46~60、2592x1944 16~20、4K 10~15，约 1 亿像素/秒封顶），
+     * 预览线程上「解码 + 全分辨率画窗口」串行是瓶颈。摘窗后 [DETACH_CHECK_MS] 内帧数不涨 → 挂回并记住该设备。
+     */
+    private fun detachPreviewWindowLocked(camera: UVCCamera) {
+        if (previewDetached) return
+        val key = currentDeviceKey
+        if (key.isNotEmpty() && key in detachUnsupported) return
+        val before = frameCbCount
+        try {
+            camera.setPreviewDisplay(null as Surface?)
+        } catch (e: Exception) {
+            Log.d("meidui", "🔌 [OTG摘窗] 摘除占位窗口失败: ${e.message}")
+            return
+        }
+        previewDetached = true
+        releaseDummySurface()
+        // 核对窗口至少覆盖 3 个帧间隔（YUYV 大分辨率可能只有 1~5fps），期间一帧不来才算摘窗后停流
+        val checkMs = maxOf(DETACH_CHECK_MS, 3000L / maxOf(1, acceptedFps))
+        Log.d("meidui", "🔌 [OTG摘窗] 已摘除占位预览窗口（${frameWidth}x${frameHeight}），${checkMs}ms 后核对是否仍出帧")
+        uvcHandler?.postDelayed({
+            if (!capturing || !streamRunning || uvcCamera !== camera || !previewDetached) return@postDelayed
+            val delta = frameCbCount - before
+            if (delta <= 0) {
+                if (key.isNotEmpty()) detachUnsupported += key
+                previewDetached = false
+                try { camera.setPreviewDisplay(ensureDummySurface(frameWidth, frameHeight)) } catch (_: Exception) {}
+                Log.d("meidui", "🔌 [OTG摘窗] ⚠️ 摘窗后 ${checkMs}ms 0 帧 → 该设备($key)不支持摘窗，已挂回占位窗口")
+                com.fz.yqlandroid.manager.OtgLogReporter.diag("摘窗后不出帧($key) → 挂回占位窗口，本进程不再摘")
+            } else {
+                val fps = (delta * 1000 / checkMs).toInt()
+                Log.d("meidui", "🔌 [OTG摘窗] ✅ 摘窗后仍正常出帧：${checkMs}ms 内 $delta 帧 ≈ ${fps}fps @${frameWidth}x${frameHeight}")
+                com.fz.yqlandroid.manager.OtgLogReporter.diag("摘窗后出帧正常 ≈${fps}fps @${frameWidth}x${frameHeight}")
+            }
+        }, checkMs)
+    }
+
     private fun releaseDummySurface() {
         try { dummyReader?.close() } catch (_: Exception) {}
         dummyReader = null
@@ -839,19 +884,20 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         //  （该华为实测：MJPEG 640x360/640x400/320x240=[240]，1280x800 最高 120）。
         //   请求的 fps 超过目标尺寸描述符上限时，此前会死磕当前尺寸（降帧→-51→黑屏）；
         //   现在自动改选「真正声明了 ≥请求fps」的最大可编码尺寸——高帧率语义本来就是分辨率让位。
-        if (requestedFps > 60 && descriptorFps.isNotEmpty()) {
+        val wantFps = if (requestedFps > 0) OtgFpsLimit.clamp(requestedFps) else 0
+        if (wantFps > 60 && descriptorFps.isNotEmpty()) {
             val curMax = descriptorFps["${fmtKeyOf(frameFormat)}@${w}x${h}"]?.maxOrNull() ?: 0
-            if (curMax in 1 until requestedFps) {
+            if (curMax in 1 until wantFps) {
                 val alt = descriptorFps.entries
-                    .filter { it.key.startsWith("${fmtKeyOf(frameFormat)}@") && it.value.any { f -> f >= requestedFps } }
+                    .filter { it.key.startsWith("${fmtKeyOf(frameFormat)}@") && it.value.any { f -> f >= wantFps } }
                     .mapNotNull { parseDescSize(it.key) }
                     .filter { (aw, ah) -> EncoderSizeLimits.isEncodable(codecName(), aw, ah) }
                     .maxByOrNull { (aw, ah) -> aw.toLong() * ah }
                 if (alt != null) {
-                    Log.d("meidui", "🔌 [OTG] 🎯 请求${requestedFps}fps 但 ${w}x${h} 描述符上限${curMax}fps" +
+                    Log.d("meidui", "🔌 [OTG] 🎯 请求${wantFps}fps 但 ${w}x${h} 描述符上限${curMax}fps" +
                             " → 自动改选支持该帧率的 ${alt.first}x${alt.second}")
                     com.fz.yqlandroid.manager.OtgLogReporter.diag(
-                        "🎯 请求${requestedFps}fps 当前档${w}x${h}上限${curMax}fps → 自动切 ${alt.first}x${alt.second}@${requestedFps}fps")
+                        "🎯 请求${wantFps}fps 当前档${w}x${h}上限${curMax}fps → 自动切 ${alt.first}x${alt.second}@${wantFps}fps")
                     w = alt.first
                     h = alt.second
                 }
@@ -864,11 +910,13 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
         //   四条策略全败 → 永久黑屏）。所以失败后的正确做法是**按帧率梯度逐个精确重试**：
         //   请求值 → 该尺寸上次协商成功值 → 60/30/25/20/15/10。
         val declaredFps = try { target?.fps?.maxOrNull()?.toInt() ?: 0 } catch (_: Exception) { 0 }
-        val exactFps = when {
-            requestedFps > 0 -> requestedFps                       // PC 指定了就照办（含 120）
-            declaredFps > 0  -> declaredFps
-            else             -> PROBE_MAX_FPS
-        }
+        // §127 后台 OTG 最高帧率：请求值先钳到上限以下（该尺寸描述符全都高于上限时，
+        //   下面照旧取「高于请求的最小档」，设备给不了更低，推送侧仍按上限节流）
+        val exactFps = OtgFpsLimit.clamp(when {
+            wantFps > 0     -> wantFps                             // PC 指定了就照办（含 120）
+            declaredFps > 0 -> declaredFps
+            else            -> PROBE_MAX_FPS
+        })
         // ⭐ §56.18 描述符已知时候选**只用描述符真值**（改自 2026-08-03 的"描述符优先"）：
         //   native 匹配条件是 fps 区间必须套住某个描述符档（it=10^7/interval ∈ [min,max]），
         //   非描述符值（如对着只有[120]的档喊 30）**必然真谈判失败**，而失败的那次调用
@@ -927,6 +975,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             throw lastErr ?: IllegalStateException("no fps candidate accepted @${w}x${h}")
         }
         // ⭐ 关键修复：挂哑预览窗口，否则 native startPreview 因无窗口不起流线程 → 无帧
+        //   （出帧确认后再由 detachPreviewWindowLocked 摘掉）
+        previewDetached = false
         camera.setPreviewDisplay(ensureDummySurface(w, h))
         camera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_NV21)
         camera.startPreview()
@@ -1566,23 +1616,16 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             }
             return@IFrameCallback
         }
-        // 池化复用：NV21Buffer 零拷贝持有 byte[]，webrtc 用完（编码/预览后）release 归还
+        // 池化复用：NV12Buffer 零拷贝持有直接内存，webrtc 用完（编码/预览后）release 归还。
+        // ⭐⭐ 2026-08-04「OTG 皮肤发蓝」实锤：native 回调虽标着 PIXEL_FORMAT_NV21，实际吐的是 NV12（U 前 V 后）。
+        //   §127 起不再在 Kotlin 里逐字节交换成 NV21（2592x1944 每帧 250 万次交换），直接按 NV12 交给 webrtc。
         val pooled = bufferPool.poll()
-        val data = if (pooled != null && pooled.size == expected) pooled else ByteArray(expected)
-        frame.get(data, 0, expected)
-        // ⭐⭐ 2026-08-04 修「OTG 颜色不正（皮肤发蓝）」：native 回调虽标着 PIXEL_FORMAT_NV21，
-        //   实际吐的是 NV12（U 前 V 后）——用户截图实锤：中性色（车顶灰/窗户白）全正常、
-        //   唯独高饱和的皮肤翻成蓝色，正是 U/V 对调的指纹（中性色 U≈V≈128 换了看不出来）。
-        //   自带摄像头没事是因为它走纹理通路，只有 OTG 走这条字节通路。
-        //   在自己的拷贝上把色度平面逐对交换成真 NV21（1080p 约 1~2ms/帧，可接受）。
-        //   下面的「色彩采样」在交换之后，日志里 V/U 已是修正后的值。
-        if (UV_SWAP) {
-            var i = w * h
-            while (i + 1 < expected) {
-                val t = data[i]; data[i] = data[i + 1]; data[i + 1] = t
-                i += 2
-            }
-        }
+        val data = if (pooled != null && pooled.capacity() == expected) pooled else ByteBuffer.allocateDirect(expected)
+        data.clear()
+        val src = frame.duplicate()
+        src.limit(src.position() + expected)
+        data.put(src)
+        data.rewind()
         // §115b 自动增益测光：仅 AGC 运行时每 5 帧在整幅画面稀疏取 ~24x14 个 Y 点求均值（开销可忽略）
         if (agcActive && frameCbCount % 5L == 0L) {
             var s = 0L
@@ -1603,8 +1646,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
             if (n > 0) lastMeanY = (s / n).toInt()
         }
         // ⭐ 2026-08-03 颜色诊断（查"OTG颜色不正"）：第10帧 + 之后每600帧，采样中心块 Y/V/U 均值
-        //   上报自诊断通道。NV21 色度平面 V 前 U 后——**对着纯红色物体**：正常应 V≫128 且 U≪128；
-        //   若相反 = native 实际吐的是 NV12（UV 序），色度对调，红蓝互换。采样 16x8 色度块，开销可忽略。
+        //   上报自诊断通道。按 NV12 读（U 前 V 后）——**对着纯红色物体**：正常应 V≫128 且 U≪128；
+        //   若相反 = 该设备/库版本 native 实际吐的是 NV21，色度对调，红蓝互换。采样 16x8 色度块，开销可忽略。
         if (frameCbCount == 10L || frameCbCount % 600L == 0L) {
             try {
                 var sy = 0L; var sv = 0L; var su = 0L
@@ -1620,8 +1663,8 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                 for (crow in (cy / 2 - 4) until (cy / 2 + 4)) {
                     for (ccol in (cx / 2 - 8) until (cx / 2 + 8)) {
                         val idx = chromaBase + crow * w + ccol * 2
-                        sv += data[idx].toInt() and 0xFF
-                        su += data[idx + 1].toInt() and 0xFF
+                        su += data[idx].toInt() and 0xFF
+                        sv += data[idx + 1].toInt() and 0xFF
                         m++
                     }
                 }
@@ -1631,9 +1674,9 @@ class UvcVideoCapturer(context: Context) : VideoCapturer, UvcDeviceMonitor.Liste
                     "（对纯红物体：正常 V≫128、U≪128；相反=色度NV12/NV21对调）")
             } catch (_: Exception) { /* 采样越界等异常不影响推流 */ }
         }
-        val nv21 = NV21Buffer(data, w, h) { bufferPool.offer(data) }
+        val nv12 = NV12Buffer(w, h, w, h, data) { bufferPool.offer(data) }
         val ts = TimeUnit.MILLISECONDS.toNanos(SystemClock.elapsedRealtime())
-        val videoFrame = VideoFrame(nv21, 0, ts)
+        val videoFrame = VideoFrame(nv12, 0, ts)
         obs.onFrameCaptured(videoFrame)
         videoFrame.release()
     }

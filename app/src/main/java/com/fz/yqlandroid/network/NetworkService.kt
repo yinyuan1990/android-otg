@@ -892,7 +892,9 @@ data class LoginResponse(
     // ⭐ §77 自带摄像头 5 档「分辨率/帧率/码率」配置（后端运营配置下发，覆盖本地默认值）。
     //   用 JsonElement 原样接住再 toString() 交给 LadderConfigStore 解析，
     //   免得为了几个数字在这里堆五层嵌套 data class。字段缺省(老后端)=null=用内置默认。
-    val videoLadder: com.google.gson.JsonElement? = null
+    val videoLadder: com.google.gson.JsonElement? = null,
+    // §127 OTG 最高帧率（总后台全局配置，0=不限；老后端缺省=null 按不限）
+    val otgMaxFps: Int? = null
 )
 
 // ⭐ 需求#13：三端最新版本号

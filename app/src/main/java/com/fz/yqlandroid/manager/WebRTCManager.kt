@@ -605,7 +605,8 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         }
         val prevFormat = cap.preferredFormat
         cap.preferredFormat = format
-        val capFps = (if (fps > 0) fps else maxOf(1, currentFps)).coerceIn(1, OTG_MAX_CAPTURE_FPS)
+        val capFps = com.fz.yqlandroid.manager.uvc.OtgFpsLimit.clamp(
+            (if (fps > 0) fps else maxOf(1, currentFps)).coerceIn(1, OTG_MAX_CAPTURE_FPS))
         Log.d("meidui", "🔗 [OTG链路|切档] 目标=${width}x${height}@${capFps}fps 格式=$fmtName（当前 ${currentWidth}x${currentHeight}，热控上限${thermalFpsCap}fps）")
         // ⭐ 2026-08-03 自诊断通道：切档入口（华为等 ROM 丢 Log.d，后台只能靠这条看到切了什么档）
         OtgLogReporter.diag("切档指令 目标=${width}x${height}@${capFps}fps 格式=$fmtName（当前 ${currentWidth}x${currentHeight}）")
@@ -685,9 +686,10 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         return if (enc > 0) enc else 120
     }
 
-    /** 推流帧率的"档位/能力"上限：OTG=编码器真实能力，自带=ladder 的 maxPushFps */
+    /** 推流帧率的"档位/能力"上限：OTG=min(编码器真实能力, 后台 OTG 最高帧率)，自带=ladder 的 maxPushFps */
     private fun pushFpsHardCap(): Int =
-        if (usingOtgCamera) otgEncoderFpsCap() else (currentLadder[currentProfile]?.maxPushFps ?: 60)
+        if (usingOtgCamera) com.fz.yqlandroid.manager.uvc.OtgFpsLimit.clamp(otgEncoderFpsCap())
+        else (currentLadder[currentProfile]?.maxPushFps ?: 60)
 
     /** 把 UVC 实际协商出的分辨率同步进 currentWidth/Height，并按新尺寸重算码率 */
     private fun syncOtgNegotiatedSize() {
@@ -1372,6 +1374,7 @@ class WebRTCManager(private val context: Context) : P2PManager.DataSource {
         appContext = context.applicationContext
         // ⭐ §77：把上次登录落盘的档位配置读回内存，保证冷启动（永久token自动登录）也能生效
         LadderConfigStore.load(appContext!!)
+        com.fz.yqlandroid.manager.uvc.OtgFpsLimit.load(appContext!!)
     }
     
     // MARK: - 编码参数
