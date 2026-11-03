@@ -433,7 +433,10 @@ fun LoginScreen(
                                         putString("public_ip", response.clientIp ?: "")
                                         // ⭐ 需求#13（2026-07-31）：后端下发的 Android 最新版本号（空=不提示）。
                                         //   StreamingScreen 进入时与本地 versionName 比对，不一致弹软提示。
-                                        putString("latest_android_version", response.latestVersions?.android ?: "")
+                                        //   OTG 专版（包名 .otg）版本和主版独立，读 otg（老后端没有 = 空 = 不提示），不能读主版的 android。
+                                        val latest = if (context.packageName.endsWith(".otg")) response.latestVersions?.otg
+                                            else response.latestVersions?.android
+                                        putString("latest_android_version", latest ?: "")
                                         putInt("max_p2p_viewers", response.maxP2PViewers ?: 4)
                                         // ⭐ §53.21：force_relay / ice_servers_json 不再落地——P2P 中继与
                                         //   打洞代码已物理删除（纯局域网 host-only 直连），无消费方。

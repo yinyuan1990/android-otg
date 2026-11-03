@@ -901,7 +901,8 @@ data class LoginResponse(
 data class LatestVersions(
     val pc: String? = null,
     val ios: String? = null,
-    val android: String? = null
+    val android: String? = null,
+    val otg: String? = null
 )
 
 /**
