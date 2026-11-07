@@ -262,6 +262,14 @@ fun StreamingScreen(
                     }
                     WebSocketManager.instance.disconnect()
                 }
+                "EXIT_APP" -> {
+                    webRTCManager.autoRecoverEnabled = false
+                    webRTCManager.stopPublish()
+                    keepAliveManager.stop()
+                    isStreaming = false
+                    WebSocketManager.instance.disconnect()
+                    com.fz.yqlandroid.manager.AppExit.exitNow(context)
+                }
             }
         }
         

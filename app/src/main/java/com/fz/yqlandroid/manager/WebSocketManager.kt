@@ -426,6 +426,15 @@ class WebSocketManager private constructor() {
                     }
                 }
                 
+                // 总后台 / PC「退出程序」：推流页在就由它停推流后退出，不在就直接结束进程
+                "EXIT_APP" -> {
+                    if (messageDeviceId == deviceId) {
+                        Log.d(TAG, "🚪 EXIT_APP: 退出程序")
+                        val handler = onSpecialMessage
+                        if (handler != null) handler.invoke("EXIT_APP", json) else AppExit.exitNow(appContext)
+                    }
+                }
+
                 "CONFIG_STATE" -> {
                     // 状态回传，忽略
                 }
